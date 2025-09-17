@@ -2,10 +2,9 @@
   "name": "backpack-api-demo",
   "version": "1.0.0",
   "description": "Backpack Exchange API 自动化交易脚本演示",
-  "main": "test.js",
+  "main": "start-bot.js",
   "scripts": {
-    "start": "node test.js",
-    "test": "node test.js",
+    "start": "node start-bot.js",
     "bot": "node start-bot.js",
     "bot:help": "node start-bot.js --help"
   },

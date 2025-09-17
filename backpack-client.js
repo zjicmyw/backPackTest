@@ -288,9 +288,10 @@ class BackpackClient {
      * @param {string} quantity - 数量
      * @param {string} price - 价格（限价单必需）
      * @param {boolean} reduceOnly - 是否仅平仓（期货专用）
+     * @param {boolean} postOnly - 是否仅挂单（只做 maker，不做 taker）
      * @returns {Promise<object>} 执行结果
      */
-    async placeOrder(symbol, side, orderType, quantity, price = null, reduceOnly = false) {
+    async placeOrder(symbol, side, orderType, quantity, price = null, reduceOnly = false, postOnly = false) {
         const order = {
             symbol,
             side,
@@ -305,6 +306,11 @@ class BackpackClient {
         // 添加 reduceOnly 参数（仅期货合约）
         if (reduceOnly) {
             order.reduceOnly = true;
+        }
+
+        // 添加 postOnly 参数（仅挂单）
+        if (postOnly) {
+            order.postOnly = true;
         }
 
         return await this.executeOrders([order]);

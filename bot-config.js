@@ -20,14 +20,14 @@ module.exports = {
         // 每个订单金额 (USDC)
         orderAmount: parseFloat(process.env.ORDER_AMOUNT) || 100,
         
-        // 止盈目标 (USDC)
-        profitTarget: parseFloat(process.env.PROFIT_TARGET) || 0.001,
+        // 除手续费外的净盈利比例 (如 0.0001 = 0.01%)
+        profitTarget: parseFloat(process.env.PROFIT_TARGET) || 0.0001,
         
         // 订单间等待时间 (秒)
         orderWaitTime: parseInt(process.env.ORDER_WAIT_TIME) || 60,
         
-        // 最大成交订单数（基于持仓价值）
-        maxActiveOrders: parseInt(process.env.MAX_ACTIVE_ORDERS) || 40,
+        // 单币种持仓最大金额 (USDC)
+        maxPositionValue: parseFloat(process.env.MAX_POSITION_VALUE) || 40000,
         
         // 交易方向: 'buy' 或 'sell'
         tradeDirection: process.env.TRADE_DIRECTION || 'buy',
@@ -37,7 +37,10 @@ module.exports = {
         fees: {
             maker: parseFloat(process.env.MAKER_FEE) || 0.0001,  // 挂单手续费 0.01%
             taker: parseFloat(process.env.TAKER_FEE) || 0.00026, // 市价手续费 0.026%
-        }
+        },
+        
+        // 仅挂单模式（PostOnly）- 只做 maker，不做 taker
+        postOnly: process.env.POST_ONLY !== 'false'
     },
     
     // ================ 日志配置 ================

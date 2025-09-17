@@ -17,6 +17,9 @@
  * - LOG_LEVEL: 日志级别 (默认: INFO)
  */
 
+// 加载 .env 文件
+require('dotenv').config();
+
 const ScalpingBot = require('./scalping-bot');
 const config = require('./bot-config');
 
@@ -62,8 +65,8 @@ function validateConfig(config) {
         errors.push('止盈目标必须大于 0');
     }
     
-    if (config.trading.maxActiveOrders <= 0) {
-        errors.push('最大活跃订单数必须大于 0');
+    if (config.trading.maxPositionValue <= 0) {
+        errors.push('最大持仓金额必须大于 0');
     }
     
     if (!['buy', 'sell'].includes(config.trading.tradeDirection)) {
@@ -83,8 +86,8 @@ function showStartupInfo(config) {
     console.log('================================');
     console.log(`交易对: ${config.trading.symbol}`);
     console.log(`每单金额: ${config.trading.orderAmount} USDC`);
-    console.log(`止盈目标: ${config.trading.profitTarget} USDC`);
-    console.log(`最大订单数: ${config.trading.maxActiveOrders}`);
+    console.log(`净盈利比例: ${(config.trading.profitTarget * 100).toFixed(4)}% (除手续费)`);
+    console.log(`最大持仓金额: ${config.trading.maxPositionValue} USDC`);
     console.log(`交易方向: ${config.trading.tradeDirection}`);
     console.log(`价格偏移: ${(config.trading.priceOffset * 100).toFixed(3)}%`);
     console.log(`订单等待: ${config.trading.orderWaitTime} 秒`);
@@ -177,22 +180,25 @@ function showHelp() {
 选项:
   --symbol <symbol>              交易对 (默认: BTC_USDC_PERP)
   --order-amount <amount>        每单金额 USDC (默认: 100)
-  --profit-target <target>       止盈目标 USDC (默认: 0.01)
-  --max-active-orders <count>    最大活跃订单数 (默认: 40)
+  --profit-target <target>       净盈利比例 如0.0001=0.01% (默认: 0.0001)
+  --max-position-value <value>   单币种持仓最大金额USDC (默认: 40000)
   --trade-direction <direction>  交易方向 buy/sell (默认: buy)
   --order-wait-time <seconds>    订单间等待时间秒 (默认: 450)
   --log-level <level>           日志级别 DEBUG/INFO/WARN/ERROR (默认: INFO)
   --help                        显示此帮助信息
 
-环境变量:
+环境变量 (可通过 .env 文件配置):
   BACKPACK_API_KEY               Backpack API 公钥 (必需)
   BACKPACK_PRIVATE_KEY           Backpack API 私钥 (必需)
   SYMBOL                         交易对
   ORDER_AMOUNT                   每单金额
-  PROFIT_TARGET                  止盈目标
-  MAX_ACTIVE_ORDERS              最大活跃订单数
+  PROFIT_TARGET                  净盈利比例(除手续费)
+  MAX_POSITION_VALUE              单币种持仓最大金额(USDC)
   TRADE_DIRECTION                交易方向
   ORDER_WAIT_TIME                订单间等待时间
+  MAKER_FEE                      挂单手续费率
+  TAKER_FEE                      市价单手续费率
+  POST_ONLY                      仅挂单模式 (true/false)
   LOG_LEVEL                      日志级别
 
 示例:
@@ -204,6 +210,11 @@ function showHelp() {
   
   # 使用环境变量
   SYMBOL=SOL_USDC_PERP ORDER_AMOUNT=200 node start-bot.js
+  
+  # 使用 .env 文件 (推荐)
+  # 1. 复制示例文件: cp bot.env.example .env
+  # 2. 编辑 .env 文件填入您的配置
+  # 3. 运行: node start-bot.js
 `);
 }
 
