@@ -177,6 +177,20 @@
 ### 统计显示优化
 - **显示频率**: 每分钟显示一次，避免频繁刷屏
 - **信息简化**: 显示总盈亏（未实现+已实现）而非分别显示
+
+### 取消订单正确用法
+- **API规范**: 使用 `DELETE /api/v1/order` 取消单个订单
+- **请求体格式**: 必须在请求体中包含 `orderId` 和 `symbol`
+- **参数要求**: `orderId` 或 `clientId` 必须指定一个（不能同时指定）
+- **错误处理**: 优雅处理 "Order not found" 等API错误
+- **示例代码**:
+```javascript
+const cancelPayload = { 
+    orderId: orderId, 
+    symbol: symbol 
+};
+await this.signedRequest('DELETE', '/api/v1/order', 'orderCancel', {}, cancelPayload);
+```
 - **视觉优化**: 使用边框设计和颜色指示盈亏状态
 - **颜色系统**: 🟢盈利 / 🔴亏损 / ⚪平衡
 - **时间格式**: 运行时间显示为 HH:MM 格式

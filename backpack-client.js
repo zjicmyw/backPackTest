@@ -323,9 +323,11 @@ class BackpackClient {
      * @returns {Promise<object>} 取消结果
      */
     async cancelOrder(orderId, symbol) {
-        // 尝试不同的取消订单方法
-        // 方法1: DELETE with request body (根据错误信息推断)
-        const cancelPayload = { orderId, symbol };
+        // 根据API文档，取消订单需要在请求体中包含 orderId 和 symbol
+        const cancelPayload = { 
+            orderId: orderId, 
+            symbol: symbol 
+        };
         return await this.signedRequest('DELETE', '/api/v1/order', 'orderCancel', {}, cancelPayload);
     }
 

@@ -41,7 +41,41 @@ Backpack 合约剥头皮交易机器人 V1.0 正式发布！这是一个功能�
 
 ## 2024年更新记录
 
-### 🎯 智能持仓金额检查重下单 (最新)
+### 🔧 取消订单参数修复 (最新)
+
+#### 问题描述
+- **API参数错误**: 取消订单时出现 "Order id or client id must be specified" 错误
+- **参数格式错误**: 取消订单的请求体格式不符合API要求
+- **订单取消失败**: 导致平仓订单无法正确取消
+
+#### 技术修复
+```javascript
+// 修复前（错误）:
+async cancelOrder(orderId, symbol) {
+    const cancelPayload = { orderId, symbol };
+    return await this.signedRequest('DELETE', '/api/v1/order', 'orderCancel', {}, cancelPayload);
+}
+
+// 修复后（正确）:
+async cancelOrder(orderId, symbol) {
+    // 根据API文档，取消订单需要在请求体中包含 orderId 和 symbol
+    const cancelPayload = { 
+        orderId: orderId, 
+        symbol: symbol 
+    };
+    return await this.signedRequest('DELETE', '/api/v1/order', 'orderCancel', {}, cancelPayload);
+}
+```
+
+#### 修复效果
+- ✅ **API兼容**: 完全符合Backpack API的OrderCancelPayload规范
+- ✅ **参数正确**: 确保orderId和symbol正确传递到请求体
+- ✅ **订单取消**: 平仓订单现在可以正确取消
+- ✅ **错误消除**: 不再出现"Order id or client id must be specified"错误
+
+---
+
+### 🎯 智能持仓金额检查重下单 (之前)
 
 #### 功能描述
 - **智能判断**: 当订单不在活跃列表中时，检查持仓金额变化来判断订单是否有效成交
