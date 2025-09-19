@@ -82,6 +82,11 @@ class ScalpingBot {
         // 跟踪上次的持仓金额，用于判断订单是否有效成交
         this.lastPositionValueBeforeOrder = 0;
         
+        // API查询间隔控制
+        this.lastCloseOrdersQueryTime = 0;
+        this.lastMarketPriceQueryTime = 0;
+        this.minQueryInterval = 1000; // 最小查询间隔1秒
+        
         // 日志文件
         this.logDir = 'logs';
         const now = new Date();
@@ -184,16 +189,34 @@ class ScalpingBot {
      * 获取当前市场价格
      */
     async getCurrentPrice() {
+        const now = Date.now();
+        
+        // 检查查询间隔，避免频繁查询
+        if (now - this.lastMarketPriceQueryTime < this.minQueryInterval) {
+            this.log('DEBUG', '市场价格查询间隔过短，跳过API查询', {
+                timeSinceLastQuery: now - this.lastMarketPriceQueryTime,
+                minInterval: this.minQueryInterval
+            });
+            // 返回缓存的价格或默认值
+            return { bid: this.currentMarketPrice, ask: this.currentMarketPrice, midPrice: this.currentMarketPrice };
+        }
+        
         try {
+            this.lastMarketPriceQueryTime = now;
             const bestPrices = await this.client.getBestPrices(this.config.symbol);
             const bid = parseFloat(bestPrices.bestBid[0]);
             const ask = parseFloat(bestPrices.bestAsk[0]);
             const midPrice = (bid + ask) / 2;
             
+            // 更新缓存的价格
+            this.currentMarketPrice = midPrice;
+            
             this.log('DEBUG', '获取市场价格', { bid, ask, midPrice });
             return { bid, ask, midPrice };
         } catch (error) {
-            this.log('ERROR', '获取市场价格失败');
+            this.log('ERROR', '获取市场价格失败', {
+                error: error.message
+            });
             throw error;
         }
     }
@@ -1248,7 +1271,19 @@ class ScalpingBot {
      * 通过API查询平仓订单
      */
     async getCloseOrdersFromAPI() {
+        const now = Date.now();
+        
+        // 检查查询间隔，避免频繁查询
+        if (now - this.lastCloseOrdersQueryTime < this.minQueryInterval) {
+            this.log('DEBUG', '查询间隔过短，跳过API查询', {
+                timeSinceLastQuery: now - this.lastCloseOrdersQueryTime,
+                minInterval: this.minQueryInterval
+            });
+            return [];
+        }
+        
         try {
+            this.lastCloseOrdersQueryTime = now;
             const orders = await this.client.getOrders(this.config.symbol);
             if (!orders || !Array.isArray(orders)) {
                 return [];
@@ -1269,7 +1304,9 @@ class ScalpingBot {
             
             return closeOrders;
         } catch (error) {
-            this.log('ERROR', '查询平仓订单失败');
+            this.log('ERROR', '查询平仓订单失败', {
+                error: error.message
+            });
             return [];
         }
     }
