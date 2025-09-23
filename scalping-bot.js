@@ -2,21 +2,24 @@ const BackpackClient = require('./backpack-client');
 const fs = require('fs');
 const path = require('path');
 
+// 全局价格精度配置
+let globalPricePrecision = 1; // 默认1位小数
+
 /**
- * 全局价格精度函数 - 确保所有价格都与市场价格精度一致
+ * 设置全局价格精度
+ * @param {number} precision - 价格精度（小数位数）
+ */
+function setGlobalPricePrecision(precision) {
+    globalPricePrecision = precision;
+}
+
+/**
+ * 全局价格精度函数 - 使用统一的价格精度格式化所有价格
  * @param {number} price - 要格式化的价格
- * @param {number} referencePrice - 参考价格（bid或ask）
  * @returns {string} 格式化后的价格字符串
  */
-function formatPriceWithMarketPrecision(price, referencePrice) {
-    if (!referencePrice) {
-        // 如果没有参考价格，使用默认精度（1位小数）
-        return parseFloat(price).toFixed(1);
-    }
-    
-    const referenceStr = referencePrice.toString();
-    const decimalPlaces = referenceStr.includes('.') ? referenceStr.split('.')[1].length : 0;
-    return parseFloat(price).toFixed(decimalPlaces);
+function formatPriceWithGlobalPrecision(price) {
+    return parseFloat(price).toFixed(globalPricePrecision);
 }
 
 /**
@@ -357,6 +360,48 @@ class ScalpingBot {
     }
 
     /**
+     * 初始化全局价格精度
+     * 程序启动时获取一次bid/ask的价格精度，后续所有下单都使用这个精度
+     */
+    async initializeGlobalPricePrecision() {
+        try {
+            this.log('INFO', '初始化全局价格精度配置...');
+            
+            // 获取市场最佳价格
+            const bestPrices = await this.client.getBestPrices(this.config.symbol);
+            const bid = bestPrices.bestBid[0];
+            const ask = bestPrices.bestAsk[0];
+            
+            // 计算bid和ask的小数位数
+            const bidDecimalPlaces = bid.toString().includes('.') ? bid.toString().split('.')[1].length : 0;
+            const askDecimalPlaces = ask.toString().includes('.') ? ask.toString().split('.')[1].length : 0;
+            
+            // 使用两者中的最大值作为全局精度
+            const maxPrecision = Math.max(bidDecimalPlaces, askDecimalPlaces);
+            
+            // 设置全局价格精度
+            setGlobalPricePrecision(maxPrecision);
+            
+            this.log('INFO', '全局价格精度配置完成', {
+                symbol: this.config.symbol,
+                bid: bid,
+                ask: ask,
+                bidDecimalPlaces: bidDecimalPlaces,
+                askDecimalPlaces: askDecimalPlaces,
+                globalPricePrecision: maxPrecision
+            });
+            
+        } catch (error) {
+            this.log('ERROR', '初始化全局价格精度失败，使用默认精度', {
+                error: error.message,
+                defaultPrecision: 1
+            });
+            // 使用默认精度
+            setGlobalPricePrecision(1);
+        }
+    }
+
+    /**
      * 获取当前市场价格
      */
     async getCurrentPrice() {
@@ -398,23 +443,16 @@ class ScalpingBot {
     calculateOrderPrice(bid, ask, side) {
         if (side === 'buy') {
             // 买单：使用买1价格，保持与bid相同的小数位数
-            return formatPriceWithMarketPrecision(bid, bid);
+            return formatPriceWithGlobalPrecision(bid);
         } else {
             // 卖单：使用卖1价格，保持与ask相同的小数位数
-            return formatPriceWithMarketPrecision(ask, ask);
+            return formatPriceWithGlobalPrecision(ask);
         }
     }
     
     /**
      * 计算订单数量
      */
-    calculateOrderQuantity(price) {
-        const quantity = this.config.orderAmount / price;
-        
-        
-        // 限制小数点后不超过8位
-        return quantity.toFixed(5).replace(/\.?0+$/, '');
-    }
     
     /**
      * 更新持仓 - 只有成交的订单才影响持仓
@@ -649,7 +687,7 @@ class ScalpingBot {
                         id: order.id,
                         side: order.side,
                         price: parseFloat(order.price).toFixed(1),
-                        quantity: parseFloat(order.quantity).toFixed(4),
+                        quantity: parseFloat(order.quantity).toFixed(5),
                         status: order.status
                     }))
                 });
@@ -684,7 +722,7 @@ class ScalpingBot {
             }
             
             // 没有平仓订单，需要创建
-            this.log('INFO', '无平仓订单，创建新的止盈单', {
+            this.log('INFO', '无平仓订单，创建新的平仓单', {
                 positionSize: currentPositionSize,
                 positionSide: actualPosition.side,
                 positionValue: currentPositionValue,
@@ -805,7 +843,7 @@ class ScalpingBot {
                         id: order.id,
                         side: order.side,
                         price: parseFloat(order.price).toFixed(1),
-                        quantity: parseFloat(order.quantity).toFixed(4),
+                        quantity: parseFloat(order.quantity).toFixed(5),
                         status: order.status
                     }))
                 });
@@ -852,7 +890,7 @@ class ScalpingBot {
                 hadExistingOrders: existingCloseOrders.length > 0
             });
             
-            const result = await this.placeTakeProfitOrder(dummyOrderId, entrySide, actualPosition.entryPrice, actualPosition.netQuantity);
+            const result = await this.placeCloseOrder(dummyOrderId, entrySide, actualPosition.entryPrice, actualPosition.netQuantity);
             
             if (result) {
                 // 创建成功，清除失败时间记录
@@ -899,13 +937,13 @@ class ScalpingBot {
      */
     async updateCloseOrderPrices(actualPosition) {
         try {
-            // 计算新的止盈价格
-            const newTakeProfitPrice = await this.calculateTakeProfitPriceFromPosition(actualPosition);
+            // 计算新的平仓价格
+            const newClosePrice = await this.calculateClosePriceFromPosition(actualPosition);
             
             // 更新所有现有的平仓订单价格
             for (const [entryOrderId, closeOrder] of this.closeOrders) {
                 const currentPrice = parseFloat(closeOrder.price);
-                const newPrice = parseFloat(newTakeProfitPrice);
+                const newPrice = parseFloat(newClosePrice);
                 
                 // 只有价格真正变化时才更新
                 if (Math.abs(currentPrice - newPrice) > 0.01) {
@@ -925,8 +963,8 @@ class ScalpingBot {
                     const closeSide = actualPosition.side === 'long' ? 'sell' : 'buy';
                     const closeOrderData = await this.placeOrder(
                         closeSide,
-                        newTakeProfitPrice,
-                        actualPosition.netQuantity.toFixed(4),
+                        newClosePrice,
+                        actualPosition.netQuantity.toFixed(5).replace(/\.?0+$/, ''),
                         5, // maxRetries
                         true, // reduceOnly
                         null, // postOnly (使用默认配置)
@@ -937,8 +975,8 @@ class ScalpingBot {
                         // 更新closeOrders记录
                         this.closeOrders.set(entryOrderId, {
                             id: closeOrderData.id,
-                            price: newTakeProfitPrice,
-                            quantity: actualPosition.netQuantity.toFixed(4),
+                            price: newClosePrice,
+                            quantity: actualPosition.netQuantity.toFixed(5),
                             side: closeSide,
                             timestamp: Date.now()
                         });
@@ -961,9 +999,9 @@ class ScalpingBot {
     }
     
     /**
-     * 计算止盈价格
+     * 计算平仓价格
      */
-    calculateTakeProfitPrice(entryPrice, side, quantity) {
+    calculateClosePrice(entryPrice, side, quantity) {
         // 计算总手续费率（开仓 + 平仓，假设都使用 maker 费率）
         const totalFeeRate = this.config.makerFee * 2; // 开仓和平仓各一次
         
@@ -973,27 +1011,27 @@ class ScalpingBot {
         // 总盈利比例 = 净盈利比例 + 手续费比例
         const totalProfitRate = netProfitRate + totalFeeRate;
         
-        let takeProfitPrice;
+        let closePrice;
         if (side === 'buy') {
-            // 买单：止盈价格 = 买入价 * (1 + 总盈利比例)
-            takeProfitPrice = parseFloat(entryPrice) * (1 + totalProfitRate);
+            // 买单：平仓价格 = 买入价 * (1 + 总盈利比例)
+            closePrice = parseFloat(entryPrice) * (1 + totalProfitRate);
         } else {
-            // 卖单：止盈价格 = 卖出价 * (1 - 总盈利比例)
-            takeProfitPrice = parseFloat(entryPrice) * (1 - totalProfitRate);
+            // 卖单：平仓价格 = 卖出价 * (1 - 总盈利比例)
+            closePrice = parseFloat(entryPrice) * (1 - totalProfitRate);
         }
         
-        this.log('DEBUG', '计算止盈价格', {
+        this.log('DEBUG', '计算平仓价格', {
             entryPrice,
             side,
             quantity,
             totalFeeRate: (totalFeeRate * 100).toFixed(4) + '%',
             netProfitRate: (netProfitRate * 100).toFixed(4) + '%',
             totalProfitRate: (totalProfitRate * 100).toFixed(4) + '%',
-            takeProfitPrice: takeProfitPrice.toFixed(1),
+            closePrice: closePrice.toFixed(1),
             feeType: 'maker'
         });
         
-        return takeProfitPrice.toFixed(1);
+        return closePrice.toFixed(1);
     }
     
     /**
@@ -1008,7 +1046,7 @@ class ScalpingBot {
                 const apiSide = side === 'buy' ? 'Bid' : 'Ask';
                 
                 // 如果没有明确指定 postOnly，则使用配置文件中的默认值
-                // 所有订单（包括止盈订单）都遵循配置中的 postOnly 设置
+                // 所有订单（包括平仓订单）都遵循配置中的 postOnly 设置
                 const usePostOnly = postOnly !== null ? postOnly : this.config.postOnly;
                 
                 this.log('INFO', '准备下单', { 
@@ -1028,7 +1066,7 @@ class ScalpingBot {
                     apiSide,           // 'Bid' 或 'Ask'
                     'Limit',           // 限价单
                     quantity,          // 数量
-                    price,             // 价格
+                    formatPriceWithGlobalPrecision(price), // 价格 - 使用全局精度函数
                     reduceOnly,        // 是否仅平仓
                     usePostOnly        // 是否仅挂单
                 );
@@ -1045,7 +1083,7 @@ class ScalpingBot {
                     
                     // 检查订单是否创建成功（有ID且没有错误）
                     if (orderData.id && !orderData.code) {
-                        // 只有开仓订单才加入 activeOrders，止盈订单不加入
+                        // 只有开仓订单才加入 activeOrders，平仓订单不加入
                         if (!isCloseOrder) {
                             this.activeOrders.set(orderData.id, {
                                 ...orderData,
@@ -1078,7 +1116,7 @@ class ScalpingBot {
                         quantity,
                         reduceOnly,
                         isCloseOrder,
-                        orderType: isCloseOrder ? '止盈订单' : '开仓订单',
+                        orderType: isCloseOrder ? '平仓订单' : '开仓订单',
                         retry: retryCount + 1
                     });
                     
@@ -1182,8 +1220,15 @@ class ScalpingBot {
                         return null;
                     }
                     
-                    // 调整数量为实际持仓数量
-                    const adjustedQuantity = actualPosition.netQuantity.toFixed(4);
+                    // 调整数量为实际持仓数量，使用正确的精度
+                    let adjustedQuantity;
+                    try {
+                        const precisionInfo = await this.getMarketPrecision(this.config.symbol);
+                        adjustedQuantity = Math.abs(actualPosition.netQuantity).toFixed(precisionInfo.quantityPrecision).replace(/\.?0+$/, '');
+                    } catch (error) {
+                        this.log('WARN', '获取数量精度失败，使用默认精度', { error: error.message });
+                        adjustedQuantity = Math.abs(actualPosition.netQuantity).toFixed(5).replace(/\.?0+$/, '');
+                    }
                     
                     if (parseFloat(adjustedQuantity) <= 0) {
                         this.log('ERROR', '实际持仓数量为0或负数，取消平仓操作', {
@@ -1343,7 +1388,7 @@ class ScalpingBot {
                 return null;
             }
             
-            return formatPriceWithMarketPrecision(adjustedPrice, null);
+            return formatPriceWithGlobalPrecision(adjustedPrice);
             
         } catch (error) {
             this.log('ERROR', '价格调整失败', { 
@@ -1360,7 +1405,7 @@ class ScalpingBot {
      */
     async cancelOrder(orderId) {
         try {
-            await this.client.cancelOrder(orderId, this.config.symbol);
+            const cancelResult = await this.client.cancelOrder(orderId, this.config.symbol);
             this.activeOrders.delete(orderId);
             this.orderCreateTimes.delete(orderId); // 清理订单创建时间记录
             
@@ -1371,7 +1416,10 @@ class ScalpingBot {
                     break;
                 }
             }
-            this.log('INFO', '订单取消成功');
+            this.log('INFO', '订单取消成功', {
+                orderId: orderId,
+                apiResponse: cancelResult
+            });
             // 清除缓存，因为订单状态已改变
             this.clearCloseOrdersCache();
             return true;
@@ -1407,11 +1455,11 @@ class ScalpingBot {
     }
     
     /**
-     * 基于实际持仓信息计算止盈价格
+     * 基于实际持仓信息计算平仓价格
      * @param {Object} position - 实际持仓信息
-     * @returns {string} 止盈价格
+     * @returns {string} 平仓价格
      */
-    async calculateTakeProfitPriceFromPosition(position) {
+    async calculateClosePriceFromPosition(position) {
         // 计算总手续费率（开仓 + 平仓，假设都使用 maker 费率）
         const totalFeeRate = this.config.makerFee * 2; // 开仓和平仓各一次
         
@@ -1421,14 +1469,14 @@ class ScalpingBot {
         // 总盈利比例 = 净盈利比例 + 手续费比例
         const totalProfitRate = netProfitRate + totalFeeRate;
         
-        // 计算理论止盈价格
-        let takeProfitPrice;
+        // 计算理论平仓价格
+        let closePrice;
         if (position.side === 'long') {
-            // 多头持仓：止盈价格 = 入仓价 * (1 + 总盈利比例)
-            takeProfitPrice = position.entryPrice * (1 + totalProfitRate);
+            // 多头持仓：平仓价格 = 入仓价 * (1 + 总盈利比例)
+            closePrice = position.entryPrice * (1 + totalProfitRate);
         } else {
-            // 空头持仓：止盈价格 = 入仓价 * (1 - 总盈利比例)
-            takeProfitPrice = position.entryPrice * (1 - totalProfitRate);
+            // 空头持仓：平仓价格 = 入仓价 * (1 - 总盈利比例)
+            closePrice = position.entryPrice * (1 - totalProfitRate);
         }
         
         // 获取当前市场价格进行比较
@@ -1436,10 +1484,10 @@ class ScalpingBot {
             const { bid, ask } = await this.getCurrentPrice();
             const marketPrice = position.side === 'long' ? bid : ask; // 多头用买价平仓，空头用卖价平仓
             
-            // 计算理论止盈价格的收益
+            // 计算理论平仓价格的收益
             const theoreticalProfitRate = position.side === 'long' 
-                ? (takeProfitPrice - position.entryPrice) / position.entryPrice
-                : (position.entryPrice - takeProfitPrice) / position.entryPrice;
+                ? (closePrice - position.entryPrice) / position.entryPrice
+                : (position.entryPrice - closePrice) / position.entryPrice;
             
             // 计算市场价格的收益
             const marketProfitRate = position.side === 'long'
@@ -1448,25 +1496,25 @@ class ScalpingBot {
             
             // 如果市场价格收益更高且超过目标收益，使用市场价格
             if (marketProfitRate > theoreticalProfitRate && marketProfitRate >= netProfitRate) {
-                this.log('INFO', '市场价格收益更高，使用市场价格作为止盈价格', {
+                this.log('INFO', '市场价格收益更高，使用市场价格作为平仓价格', {
                     positionSide: position.side,
                     entryPrice: position.entryPrice.toFixed(1),
-                    theoreticalPrice: takeProfitPrice.toFixed(1),
+                    theoreticalPrice: closePrice.toFixed(1),
                     marketPrice: marketPrice.toFixed(1),
                     theoreticalProfitRate: (theoreticalProfitRate * 100).toFixed(4) + '%',
                     marketProfitRate: (marketProfitRate * 100).toFixed(4) + '%',
                     targetProfitRate: (netProfitRate * 100).toFixed(4) + '%'
                 });
-                takeProfitPrice = marketPrice;
+                closePrice = marketPrice;
             }
         } catch (error) {
-            this.log('WARN', '获取市场价格失败，使用理论止盈价格', {
+            this.log('WARN', '获取市场价格失败，使用理论平仓价格', {
                 error: error.message,
-                theoreticalPrice: takeProfitPrice.toFixed(1)
+                theoreticalPrice: closePrice.toFixed(1)
             });
         }
         
-        this.log('DEBUG', '计算止盈价格', {
+        this.log('DEBUG', '计算平仓价格', {
             positionSide: position.side,
             entryPrice: position.entryPrice,
             netQuantity: position.netQuantity,
@@ -1474,7 +1522,7 @@ class ScalpingBot {
             totalFeeRate: (totalFeeRate * 100).toFixed(4) + '%',
             netProfitRate: (netProfitRate * 100).toFixed(4) + '%',
             totalProfitRate: (totalProfitRate * 100).toFixed(4) + '%',
-            takeProfitPrice: takeProfitPrice.toString()
+            closePrice: closePrice.toString()
         });
         
         // 获取当前市场价格来确定小数位数（强制获取最新价格）
@@ -1483,10 +1531,10 @@ class ScalpingBot {
             this.lastMarketPriceQueryTime = 0;
             const { bid, ask } = await this.getCurrentPrice();
             const marketPrice = position.side === 'long' ? bid : ask;
-            const formattedPrice = formatPriceWithMarketPrecision(takeProfitPrice, marketPrice);
+            const formattedPrice = formatPriceWithGlobalPrecision(closePrice);
             
-            this.log('DEBUG', '止盈价格精度调整', {
-                originalPrice: takeProfitPrice,
+            this.log('DEBUG', '平仓价格精度调整', {
+                originalPrice: closePrice,
                 marketPrice: marketPrice,
                 formattedPrice: formattedPrice
             });
@@ -1496,9 +1544,9 @@ class ScalpingBot {
             // 如果获取市场价格失败，使用默认精度（1位小数）
             this.log('WARN', '获取市场价格失败，使用默认精度', {
                 error: error.message,
-                defaultPrice: formatPriceWithMarketPrecision(takeProfitPrice, null)
+                defaultPrice: formatPriceWithGlobalPrecision(closePrice)
             });
-            return formatPriceWithMarketPrecision(takeProfitPrice, null);
+            return formatPriceWithGlobalPrecision(closePrice);
         }
     }
     
@@ -1576,12 +1624,13 @@ class ScalpingBot {
     }
     
     /**
-     * 清除平仓订单缓存
+     * 清除平仓订单缓存并重置查询间隔
      */
     clearCloseOrdersCache() {
         this.cachedCloseOrders = null;
         this.cachedCloseOrdersTime = 0;
-        this.log('DEBUG', '清除平仓订单缓存');
+        this.lastCloseOrdersQueryTime = 0; // 重置查询间隔，允许立即查询
+        this.log('DEBUG', '清除平仓订单缓存并重置查询间隔');
     }
     
     /**
@@ -1620,9 +1669,9 @@ class ScalpingBot {
     }
     
     /**
-     * 下止盈单
+     * 下平仓单
      */
-    async placeTakeProfitOrder(entryOrderId, entrySide, entryPrice, quantity) {
+    async placeCloseOrder(entryOrderId, entrySide, entryPrice, quantity) {
         try {
             // 防止重复创建，如果已经在创建过程中，直接返回
             if (this.isCreatingCloseOrder) {
@@ -1637,7 +1686,7 @@ class ScalpingBot {
             const actualPosition = await this.getActualPositionInfo();
             
             if (!actualPosition || actualPosition.positionValue === 0) {
-                this.log('WARN', '当前无持仓，跳过止盈单');
+                this.log('WARN', '当前无持仓，跳过平仓单');
                 return null;
             }
             
@@ -1651,7 +1700,7 @@ class ScalpingBot {
                         id: order.id,
                         side: order.side,
                         price: parseFloat(order.price).toFixed(1),
-                        quantity: parseFloat(order.quantity).toFixed(4),
+                        quantity: parseFloat(order.quantity).toFixed(5),
                         status: order.status
                     }))
                 });
@@ -1684,8 +1733,8 @@ class ScalpingBot {
                 this.log('INFO', '无现有平仓单，直接创建新平仓单');
             }
             
-            // 基于实际持仓信息计算止盈价格
-            const takeProfitPrice = await this.calculateTakeProfitPriceFromPosition(actualPosition);
+            // 基于实际持仓信息计算平仓价格
+            const closePrice = await this.calculateClosePriceFromPosition(actualPosition);
             
             // 计算平仓方向（与实际持仓相反）
             // 如果是多头持仓(long)，需要卖出平仓(sell)
@@ -1695,19 +1744,28 @@ class ScalpingBot {
             // 转换side格式，符合内部处理逻辑
             const closeApiSide = closeSide === 'buy' ? 'Bid' : 'Ask';
             
-            this.log('INFO', '准备下止盈单', {
+            this.log('INFO', '准备下平仓单', {
                 entryOrderId,
                 actualPosition,
                 closeSide,
                 closeApiSide,
                 orderType: 'Limit',
-                takeProfitPrice,
-                explanation: `实际持仓${actualPosition.side} ${actualPosition.netQuantity}，入仓价${actualPosition.entryPrice}，止盈价${takeProfitPrice}`
+                closePrice,
+                explanation: `实际持仓${actualPosition.side} ${actualPosition.netQuantity}，入仓价${actualPosition.entryPrice}，平仓价${closePrice}`
             });
             
-            // 使用API返回的原始数量，不进行精度限制
+            // 使用API返回的原始数量，并格式化为正确的精度
             const actualQuantity = Math.abs(actualPosition.netQuantity);
-            const orderQuantity = actualQuantity.toString(); // 使用原始精度
+            
+            // 获取市场精度信息来格式化数量
+            let orderQuantity;
+            try {
+                const precisionInfo = await this.getMarketPrecision(this.config.symbol);
+                orderQuantity = actualQuantity.toFixed(precisionInfo.quantityPrecision).replace(/\.?0+$/, '');
+            } catch (error) {
+                this.log('WARN', '获取数量精度失败，使用默认精度', { error: error.message });
+                orderQuantity = actualQuantity.toFixed(5).replace(/\.?0+$/, '');
+            }
             
             // 确保订单数量为正数
             if (actualQuantity <= 0) {
@@ -1718,11 +1776,11 @@ class ScalpingBot {
                 return null;
             }
             
-            // 下止盈单（使用实际持仓数量，限价单，仅平仓）
-            // 通过 placeOrder 方法，止盈订单会自动使用配置的 postOnly 设置
+            // 下平仓单（使用实际持仓数量，限价单，仅平仓）
+            // 通过 placeOrder 方法，平仓订单会自动使用配置的 postOnly 设置
             this.log('DEBUG', '准备创建平仓订单', {
                 closeSide,
-                takeProfitPrice,
+                closePrice,
                 quantity: orderQuantity,
                 actualQuantity: actualQuantity,
                 positionSide: actualPosition.side,
@@ -1733,12 +1791,12 @@ class ScalpingBot {
             
             const closeOrderData = await this.placeOrder(
                 closeSide,             // 'buy' 或 'sell'
-                takeProfitPrice,       // 价格
+                closePrice,       // 价格
                 orderQuantity,         // 使用处理后的数量
                 5,                     // maxRetries
                 true,                  // reduceOnly = true，仅平仓
                 null,                  // postOnly = null，使用默认配置
-                true                   // isCloseOrder = true，标识为止盈订单
+                true                   // isCloseOrder = true，标识为平仓订单
             );
             
             this.log('DEBUG', '平仓订单创建结果', {
@@ -1747,23 +1805,23 @@ class ScalpingBot {
             });
             
             if (closeOrderData) {
-                // 将止盈订单记录到 closeOrders
+                // 将平仓订单记录到 closeOrders
                 this.closeOrders.set(entryOrderId, {
                     ...closeOrderData,
                     entryOrderId,
                     entrySide,
                     entryPrice,
                     closeSide,
-                    takeProfitPrice,
+                    closePrice,
                     timestamp: Date.now(),
                     status: 'pending'
                 });
                 
-                this.log('INFO', '止盈单创建成功', {
+                this.log('INFO', '平仓单创建成功', {
                     entryOrderId,
                     closeOrderId: closeOrderData.id,
                     closeSide,
-                    takeProfitPrice,
+                    closePrice,
                     quantity: orderQuantity,
                     actualQuantity: actualQuantity,
                     positionValue: actualPosition.positionValue,
@@ -1776,20 +1834,20 @@ class ScalpingBot {
                     symbol: this.config.symbol,
                     side: closeApiSide, // 直接使用 API side ('Bid' 或 'Ask')
                     orderType: 'Limit',
-                    price: takeProfitPrice,
+                    price: closePrice,
                     quantity: orderQuantity,
                     orderId: closeOrderData.id,
                     status: 'New',
-                    notes: `TakeProfit for ${entryOrderId}`
+                    notes: `平仓单 for ${entryOrderId}`
                 });
                 
                 return closeOrderData;
             } else {
-                throw new Error('止盈单创建失败：无返回数据');
+                throw new Error('平仓单创建失败：无返回数据');
             }
             
         } catch (error) {
-            this.log('ERROR', '下止盈单失败', { 
+            this.log('ERROR', '下平仓单失败', { 
                 entryOrderId, 
                 entrySide, 
                 entryPrice, 
@@ -1985,14 +2043,14 @@ class ScalpingBot {
             try {
                 const side = orderData.internalSide || (orderData.side === 'Bid' ? 'buy' : 'sell');
                 const executedQty = parseFloat(orderData.executedQuantity) || parseFloat(orderData.quantity);
-                this.log('DEBUG', '准备下平仓单（止盈价）', {
+                this.log('DEBUG', '准备下平仓单（平仓价）', {
                     orderId,
                     side,
                     orderPrice: orderData.price,
                     executedQty,
                     currentPosition: this.currentPosition
                 });
-                await this.placeTakeProfitOrder(orderId, side, parseFloat(orderData.price), executedQty);
+                await this.placeCloseOrder(orderId, side, parseFloat(orderData.price), executedQty);
             } catch (error) {
                 this.log('ERROR', '下平仓单失败', {
                     orderId,
@@ -2046,23 +2104,23 @@ class ScalpingBot {
                 if (actualProfit > 0) {
                     this.stats.successfulOrders++;
                     this.stats.totalProfit += actualProfit;
-                    this.log('INFO', '止盈成功', { 
+                    this.log('INFO', '平仓成功', { 
                         entryOrderId, 
                         closeOrderId: closeOrderData.id,
                         actualProfit,
                         newPosition: this.currentPosition
                     });
                     
-                    // 记录止盈交易
+                    // 记录平仓交易
                     this.logTrade({
                         ...closeOrderData,
                         status: 'Filled',
                         profit: actualProfit.toFixed(4),
-                        notes: `TakeProfit successful (Entry: ${entryOrderId})`
+                        notes: `平仓成功 (Entry: ${entryOrderId})`
                     });
                     
-                    // 止盈后立即下新单
-                    this.log('INFO', '止盈成功，立即开新单', { 
+                    // 平仓后立即下新单
+                    this.log('INFO', '平仓成功，立即开新单', { 
                         entryOrderId, 
                         actualProfit,
                         newPosition: this.currentPosition
@@ -2081,7 +2139,7 @@ class ScalpingBot {
                         ...closeOrderData,
                         status: 'Filled',
                         profit: actualProfit.toFixed(4),
-                        notes: `TakeProfit no profit (Entry: ${entryOrderId})`
+                        notes: `平仓无盈利 (Entry: ${entryOrderId})`
                     });
                     
                     // 等待后下新单
@@ -2125,11 +2183,11 @@ class ScalpingBot {
             // 计算盈亏
             const profit = await this.calculateProfit(orderData);
             
-            // 3. 止盈单：计算当前持仓的盈利扣除手续费后是否达到止盈标准
+            // 3. 平仓单：计算当前持仓的盈利扣除手续费后是否达到平仓标准
             if (profit >= this.config.profitTarget) {
                 this.stats.successfulOrders++;
                 this.stats.totalProfit += profit;
-                this.log('INFO', '订单达到止盈标准', { 
+                this.log('INFO', '订单达到平仓标准', { 
                     orderId, 
                     profit, 
                     profitTarget: this.config.profitTarget,
@@ -2144,15 +2202,15 @@ class ScalpingBot {
                     notes: `Profitable (Target: ${this.config.profitTarget})`
                 });
                 
-                // 2. 止盈后马上下一单
-                this.log('INFO', '订单达到止盈标准，立即开新单', { 
+                // 2. 平仓后马上下一单
+                this.log('INFO', '订单达到平仓标准，立即开新单', { 
                     orderId, 
                     profit, 
                     profitTarget: this.config.profitTarget 
                 });
                 await this.placeNewOrder();
             } else {
-                this.log('INFO', '订单未达到止盈标准');
+                this.log('INFO', '订单未达到平仓标准');
                 
                 // 记录未盈利交易
                 this.logTrade({
@@ -2162,8 +2220,8 @@ class ScalpingBot {
                     notes: `No profit (Target: ${this.config.profitTarget})`
                 });
                 
-                // 未达到止盈标准时等待指定时间后开新单
-                this.log('INFO', `订单未达到止盈标准，等待 ${this.config.orderWaitTime} 秒后开新单`);
+                // 未达到平仓标准时等待指定时间后开新单
+                this.log('INFO', `订单未达到平仓标准，等待 ${this.config.orderWaitTime} 秒后开新单`);
                 
                 setTimeout(async () => {
                     try {
@@ -2346,13 +2404,13 @@ class ScalpingBot {
                 }
                 
                 this.log('DEBUG', '新订单价格检查通过', {
-                    entryPrice: formatPriceWithMarketPrecision(entryPrice, null),
-                    newOrderPrice: formatPriceWithMarketPrecision(newOrderPrice, null),
+                    entryPrice: formatPriceWithGlobalPrecision(entryPrice),
+                    newOrderPrice: formatPriceWithGlobalPrecision(newOrderPrice),
                     side,
                     positionSide: actualPosition.side,
                     priceDifference: side === 'buy' ? 
-                        formatPriceWithMarketPrecision(newOrderPrice - entryPrice, null) : 
-                        formatPriceWithMarketPrecision(entryPrice - newOrderPrice, null)
+                        formatPriceWithGlobalPrecision(newOrderPrice - entryPrice) : 
+                        formatPriceWithGlobalPrecision(entryPrice - newOrderPrice)
                 });
             }
             
@@ -2598,7 +2656,7 @@ class ScalpingBot {
                                             id: order.id,
                                             side: order.side,
                                             price: parseFloat(order.price).toFixed(1),
-                                            quantity: parseFloat(order.quantity).toFixed(4),
+                                            quantity: parseFloat(order.quantity).toFixed(5),
                                             status: order.status
                                         }))
                                     });
@@ -2642,7 +2700,7 @@ class ScalpingBot {
                     console.log(`│ 📈 ${position.symbol.padEnd(17)} │`);
                     console.log(`│ 💼 持仓: ${Math.abs(netQuantity).toFixed(4).padEnd(10)} ${positionSide.padEnd(5)}    │`);
                     console.log(`│ 💰 价值: ${positionValue.toFixed(2).padEnd(12)} USDC           │`);
-                    console.log(`│ 📊 入仓: ${formatPriceWithMarketPrecision(entryPrice, markPrice).padEnd(10)} 现价: ${formatPriceWithMarketPrecision(markPrice, markPrice).padEnd(10)} │`);
+                    console.log(`│ 📊 入仓: ${formatPriceWithGlobalPrecision(entryPrice).padEnd(10)} 现价: ${formatPriceWithGlobalPrecision(markPrice).padEnd(10)} │`);
                     console.log(`│ 🎯 平仓: ${closeOrderInfo.padEnd(35)} │`);
                     console.log(`│ ${pnlColor} 盈亏: ${pnlSign}${totalPnl.toFixed(4).padEnd(12)} USDC           │`);
                 }
@@ -2681,6 +2739,9 @@ class ScalpingBot {
         this.log('INFO', '🚀 剥头皮交易机器人启动');
         
         try {
+            // 0. 初始化全局价格精度
+            await this.initializeGlobalPricePrecision();
+            
             // 1. 机器人开启后马上下1单
             this.log('INFO', '机器人启动，立即下第一单');
             await this.placeNewOrder();
