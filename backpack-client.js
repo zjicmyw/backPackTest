@@ -429,6 +429,57 @@ class BackpackClient {
             throw error;
         }
     }
+
+    /**
+     * 获取市场信息
+     * @returns {Promise<Array>} 市场信息列表
+     */
+    async getMarkets() {
+        try {
+            const response = await fetch(`https://api.backpack.exchange/api/v1/markets`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            const result = await response.json();
+            return result || [];
+        } catch (error) {
+            console.error('获取市场信息失败:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * 获取特定市场信息
+     * @param {string} symbol - 交易对符号
+     * @returns {Promise<Object>} 市场信息
+     */
+    async getMarket(symbol) {
+        try {
+            const response = await fetch(`https://api.backpack.exchange/api/v1/market?symbol=${symbol}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            const result = await response.json();
+            return result;
+        } catch (error) {
+            console.error(`获取市场 ${symbol} 信息失败:`, error.message);
+            throw error;
+        }
+    }
 }
 
 module.exports = BackpackClient;

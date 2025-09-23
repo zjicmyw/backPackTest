@@ -112,6 +112,11 @@ class ScalpingBot {
         this.cachedCloseOrdersTime = 0;
         this.cacheValidDuration = 2000; // 缓存有效期2秒
         
+        // 市场精度缓存
+        this.marketPrecisionCache = new Map();
+        this.marketPrecisionCacheTime = 0;
+        this.marketPrecisionCacheDuration = 300000; // 5分钟缓存有效期
+        
         // 日志文件
         this.logDir = 'logs';
         const now = new Date();
@@ -210,6 +215,147 @@ class ScalpingBot {
         fs.appendFileSync(this.csvLogFile, csvRow);
     }
     
+    /**
+     * 获取市场精度信息
+     * @param {string} symbol - 交易对符号
+     * @returns {Promise<Object>} 精度信息 {pricePrecision, quantityPrecision}
+     */
+    async getMarketPrecision(symbol) {
+        try {
+            // 检查缓存
+            const now = Date.now();
+            if (this.marketPrecisionCache.has(symbol) && 
+                (now - this.marketPrecisionCacheTime) < this.marketPrecisionCacheDuration) {
+                return this.marketPrecisionCache.get(symbol);
+            }
+
+            // 获取市场信息
+            const marketInfo = await this.client.getMarket(symbol);
+            
+            if (!marketInfo || !marketInfo.filters) {
+                this.log('WARN', '无法获取市场精度信息，使用默认精度', { symbol });
+                return { pricePrecision: 1, quantityPrecision: 4 };
+            }
+
+            // 解析精度信息
+            const pricePrecision = this.calculatePrecisionFromTickSize(marketInfo.filters.price.tickSize);
+            const quantityPrecision = this.calculatePrecisionFromStepSize(marketInfo.filters.quantity.stepSize);
+
+            const precisionInfo = {
+                pricePrecision,
+                quantityPrecision,
+                tickSize: marketInfo.filters.price.tickSize,
+                stepSize: marketInfo.filters.quantity.stepSize,
+                minPrice: marketInfo.filters.price.minPrice,
+                minQuantity: marketInfo.filters.quantity.minQuantity
+            };
+
+            // 缓存结果
+            this.marketPrecisionCache.set(symbol, precisionInfo);
+            this.marketPrecisionCacheTime = now;
+
+            this.log('DEBUG', '获取市场精度信息', {
+                symbol,
+                pricePrecision,
+                quantityPrecision,
+                tickSize: marketInfo.filters.price.tickSize,
+                stepSize: marketInfo.filters.quantity.stepSize
+            });
+
+            return precisionInfo;
+        } catch (error) {
+            this.log('ERROR', '获取市场精度信息失败', { symbol, error: error.message });
+            // 返回默认精度
+            return { pricePrecision: 1, quantityPrecision: 4 };
+        }
+    }
+
+    /**
+     * 根据tickSize计算价格精度
+     * @param {string} tickSize - 价格增量
+     * @returns {number} 小数位数
+     */
+    calculatePrecisionFromTickSize(tickSize) {
+        const tick = parseFloat(tickSize);
+        if (tick >= 1) return 0;
+        if (tick >= 0.1) return 1;
+        if (tick >= 0.01) return 2;
+        if (tick >= 0.001) return 3;
+        if (tick >= 0.0001) return 4;
+        if (tick >= 0.00001) return 5;
+        if (tick >= 0.000001) return 6;
+        if (tick >= 0.0000001) return 7;
+        if (tick >= 0.00000001) return 8;
+        return 8; // 最大8位小数
+    }
+
+    /**
+     * 根据stepSize计算数量精度
+     * @param {string} stepSize - 数量增量
+     * @returns {number} 小数位数
+     */
+    calculatePrecisionFromStepSize(stepSize) {
+        const step = parseFloat(stepSize);
+        if (step >= 1) return 0;
+        if (step >= 0.1) return 1;
+        if (step >= 0.01) return 2;
+        if (step >= 0.001) return 3;
+        if (step >= 0.0001) return 4;
+        if (step >= 0.00001) return 5;
+        if (step >= 0.000001) return 6;
+        if (step >= 0.0000001) return 7;
+        if (step >= 0.00000001) return 8;
+        return 8; // 最大8位小数
+    }
+
+    /**
+     * 根据市场精度计算订单数量
+     * @param {number} price - 订单价格
+     * @returns {Promise<string>} 格式化后的数量
+     */
+    async calculateOrderQuantityWithPrecision(price) {
+        const quantity = this.config.orderAmount / price;
+        
+        try {
+            // 获取市场精度信息
+            const precisionInfo = await this.getMarketPrecision(this.config.symbol);
+            const quantityPrecision = precisionInfo.quantityPrecision;
+            
+            // 确保数量不小于最小数量
+            const minQuantity = parseFloat(precisionInfo.minQuantity || '0');
+            if (quantity < minQuantity) {
+                this.log('WARN', '计算数量小于最小数量，使用最小数量', {
+                    calculatedQuantity: quantity,
+                    minQuantity: minQuantity,
+                    symbol: this.config.symbol
+                });
+                return minQuantity.toString();
+            }
+            
+            // 使用市场精度格式化数量
+            const formattedQuantity = quantity.toFixed(quantityPrecision).replace(/\.?0+$/, '');
+            
+            this.log('DEBUG', '计算订单数量', {
+                orderAmount: this.config.orderAmount,
+                price: price,
+                calculatedQuantity: quantity,
+                quantityPrecision: quantityPrecision,
+                formattedQuantity: formattedQuantity,
+                symbol: this.config.symbol,
+                minQuantity: minQuantity
+            });
+            
+            return formattedQuantity;
+        } catch (error) {
+            this.log('ERROR', '计算订单数量失败，使用默认精度', {
+                error: error.message,
+                quantity: quantity
+            });
+            // 回退到默认精度
+            return quantity.toFixed(4).replace(/\.?0+$/, '');
+        }
+    }
+
     /**
      * 获取当前市场价格
      */
@@ -2148,7 +2294,7 @@ class ScalpingBot {
             // 计算订单参数 - 直接使用买1或卖1价格
             const side = this.config.tradeDirection;
             const price = this.calculateOrderPrice(bid, ask, side);
-            const quantity = this.calculateOrderQuantity(price);
+            const quantity = await this.calculateOrderQuantityWithPrecision(price);
 
             // 转换side格式
             const apiSide = side === 'buy' ? 'Bid' : 'Ask';
