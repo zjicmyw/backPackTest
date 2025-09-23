@@ -402,6 +402,33 @@ class BackpackClient {
             throw error;
         }
     }
+
+    /**
+     * 获取历史成交记录
+     * @param {object} params - 查询参数
+     * @param {string} params.orderId - 可选的订单ID过滤
+     * @param {string} params.symbol - 可选的交易对过滤
+     * @param {number} params.from - 可选的开始时间（毫秒时间戳）
+     * @param {number} params.to - 可选的结束时间（毫秒时间戳）
+     * @param {string} params.fillType - 可选的成交类型过滤（User, System）
+     * @returns {Promise<Array>} 成交记录列表
+     */
+    async getFillHistory(params = {}) {
+        try {
+            const queryParams = {};
+            if (params.orderId) queryParams.orderId = params.orderId;
+            if (params.symbol) queryParams.symbol = params.symbol;
+            if (params.from) queryParams.from = params.from;
+            if (params.to) queryParams.to = params.to;
+            if (params.fillType) queryParams.fillType = params.fillType;
+
+            const result = await this.signedRequest('GET', '/wapi/v1/history/fills', 'fillHistoryQueryAll', queryParams);
+            return result || [];
+        } catch (error) {
+            console.error('获取成交历史失败:', error.message);
+            throw error;
+        }
+    }
 }
 
 module.exports = BackpackClient;

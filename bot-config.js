@@ -40,7 +40,10 @@ module.exports = {
         },
         
         // 仅挂单模式（PostOnly）- 只做 maker，不做 taker
-        postOnly: process.env.POST_ONLY !== 'false'
+        postOnly: process.env.POST_ONLY !== 'false',
+        
+        // 最小价格差异要求（确保有足够价差来盈利）
+        minPriceDifference: parseFloat(process.env.MIN_PRICE_DIFFERENCE) || 0.00015
     },
     
     // ================ 日志配置 ================
