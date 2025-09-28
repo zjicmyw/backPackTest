@@ -5,6 +5,13 @@ const path = require('path');
 // 全局价格精度配置
 let globalPricePrecision = 1; // 默认1位小数
 
+// 全局成交价格记录
+let lastTradePrice = null; // 上一次成交价格
+let lastTradeSide = null; // 上一次成交方向 ('buy' 或 'sell')
+
+// 全局交易历史记录
+let tradeHistory = []; // 存储交易历史记录
+
 /**
  * 设置全局价格精度
  * @param {number} precision - 价格精度（小数位数）
@@ -20,6 +27,128 @@ function setGlobalPricePrecision(precision) {
  */
 function formatPriceWithGlobalPrecision(price) {
     return parseFloat(price).toFixed(globalPricePrecision);
+}
+
+/**
+ * 记录成交价格和方向
+ * @param {number} price - 成交价格
+ * @param {string} side - 成交方向 ('buy' 或 'sell')
+ */
+function recordTradePrice(price, side) {
+    lastTradePrice = parseFloat(price);
+    lastTradeSide = side;
+}
+
+/**
+ * 清空成交价格记录
+ */
+function clearTradePrice() {
+    lastTradePrice = null;
+    lastTradeSide = null;
+}
+
+/**
+ * 获取上一次成交价格和方向
+ * @returns {object} {price: number|null, side: string|null}
+ */
+function getLastTradeInfo() {
+    return {
+        price: lastTradePrice,
+        side: lastTradeSide
+    };
+}
+
+/**
+ * 记录交易历史
+ * @param {string} symbol - 交易对符号
+ * @param {string} entryOrderId - 开仓订单ID
+ * @param {string|null} closeOrderId - 平仓订单ID（开仓时为null）
+ * @param {number} entryTime - 开仓时间戳
+ * @param {number|null} closeTime - 平仓时间戳（开仓时为null）
+ * @param {number|null} duration - 持续时间（毫秒，开仓时为null）
+ * @param {number|null} profit - 盈利金额（开仓时为null）
+ */
+function recordTradeHistory(symbol, entryOrderId, closeOrderId, entryTime, closeTime, duration, profit) {
+    const tradeRecord = {
+        symbol,
+        entryOrderId,
+        closeOrderId,
+        entryTime,
+        closeTime,
+        duration,
+        profit,
+        timestamp: Date.now(),
+        isComplete: closeOrderId !== null // 标记是否为完整交易（有开仓和平仓）
+    };
+    
+    tradeHistory.push(tradeRecord);
+    
+    // 只保留最近100笔交易记录，避免内存占用过多
+    if (tradeHistory.length > 100) {
+        tradeHistory = tradeHistory.slice(-100);
+    }
+}
+
+/**
+ * 获取指定交易对的上一笔完整交易记录（有开仓和平仓的）
+ * @param {string} symbol - 交易对符号
+ * @returns {object|null} 上一笔完整交易记录
+ */
+function getLastTradeHistory(symbol) {
+    // 从最新的记录开始查找，只返回完整的交易记录
+    for (let i = tradeHistory.length - 1; i >= 0; i--) {
+        const trade = tradeHistory[i];
+        if (trade.symbol === symbol && trade.isComplete) {
+            console.log(`找到完整交易记录: entryOrderId=${trade.entryOrderId}, closeOrderId=${trade.closeOrderId}, duration=${trade.duration}ms`);
+            return trade;
+        }
+    }
+    console.log(`未找到完整交易记录，历史记录详情:`, tradeHistory.map(t => ({
+        symbol: t.symbol,
+        entryOrderId: t.entryOrderId,
+        isComplete: t.isComplete,
+        duration: t.duration
+    })));
+    return null;
+}
+
+/**
+ * 根据上一笔交易持续时间计算订单金额倍数
+ * @param {string} symbol - 交易对符号
+ * @param {number} baseOrderAmount - 基础订单金额
+ * @returns {number} 调整后的订单金额
+ */
+function calculateOrderAmountMultiplier(symbol, baseOrderAmount) {
+    const lastTrade = getLastTradeHistory(symbol);
+    
+    console.log(`查询交易历史: symbol=${symbol}, 历史记录数量=${tradeHistory.length}, 找到记录=${!!lastTrade}`);
+    
+    if (!lastTrade) {
+        // 没有历史记录，使用基础金额
+        console.log('没有历史记录，使用基础金额')
+        return baseOrderAmount;
+    }
+    
+    const durationMinutes = lastTrade.duration / (1000 * 60); // 转换为分钟
+    console.log(`上一笔交易持续时间: ${durationMinutes.toFixed(2)} 分钟`);
+    
+    if (durationMinutes <= 2) {
+        console.log('2分钟以内，使用2倍金额')
+        // 2分钟以内，使用2倍金额
+        return baseOrderAmount * 2;
+    } else if (durationMinutes <= 4&&durationMinutes>2) {
+        console.log('2-4分钟，使用1.5倍金额')
+        // 2-4分钟，使用1.5倍金额
+        return baseOrderAmount * 1.5;
+    } else if (durationMinutes <= 6&&durationMinutes>4) {
+        console.log('4-6分钟，使用1.2倍金额')
+        // 4-6分钟，使用1.2倍金额
+        return baseOrderAmount * 1.2;
+    }
+     else {
+        // 超过4分钟，使用基础金额
+        return baseOrderAmount;
+    }
 }
 
 /**
@@ -104,6 +233,9 @@ class ScalpingBot {
         
         // 跟踪上次的持仓金额，用于判断订单是否有效成交
         this.lastPositionValueBeforeOrder = 0;
+        
+        // 记录每个symbol最后创建平仓单的时间，防止频繁创建
+        this.lastCloseOrderCreateTime = new Map(); // symbol -> timestamp
         
         // API查询间隔控制
         this.lastCloseOrdersQueryTime = 0;
@@ -314,10 +446,15 @@ class ScalpingBot {
     /**
      * 根据市场精度计算订单数量
      * @param {number} price - 订单价格
+     * @param {boolean} useBaseAmount - 是否使用基础金额（不进行动态调整）
      * @returns {Promise<string>} 格式化后的数量
      */
-    async calculateOrderQuantityWithPrecision(price) {
-        const quantity = this.config.orderAmount / price;
+    async calculateOrderQuantityWithPrecision(price, useBaseAmount = false) {
+        // 根据上一笔交易持续时间调整订单金额
+        const adjustedOrderAmount = useBaseAmount ? 
+            this.config.orderAmount : 
+            calculateOrderAmountMultiplier(this.config.symbol, this.config.orderAmount);
+        const quantity = adjustedOrderAmount / price;
         
         try {
             // 获取市场精度信息
@@ -339,13 +476,17 @@ class ScalpingBot {
             const formattedQuantity = quantity.toFixed(quantityPrecision).replace(/\.?0+$/, '');
             
             this.log('DEBUG', '计算订单数量', {
-                orderAmount: this.config.orderAmount,
+                isNewPosition: !useBaseAmount,
+                baseOrderAmount: this.config.orderAmount,
+                adjustedOrderAmount: adjustedOrderAmount,
+                multiplier: adjustedOrderAmount / this.config.orderAmount,
                 price: price,
-                calculatedQuantity: quantity,
-                quantityPrecision: quantityPrecision,
-                formattedQuantity: formattedQuantity,
+                // calculatedQuantity: quantity,
+                // quantityPrecision: quantityPrecision,
+                // formattedQuantity: formattedQuantity,
                 symbol: this.config.symbol,
-                minQuantity: minQuantity
+                // minQuantity: minQuantity,
+                amountType: useBaseAmount ? '基础金额' : '动态调整金额'
             });
             
             return formattedQuantity;
@@ -409,10 +550,11 @@ class ScalpingBot {
         
         // 检查查询间隔，避免频繁查询
         if (now - this.lastMarketPriceQueryTime < this.minQueryInterval) {
-            this.log('DEBUG', '市场价格查询间隔过短，跳过API查询', {
-                timeSinceLastQuery: now - this.lastMarketPriceQueryTime,
-                minInterval: this.minQueryInterval
-            });
+            // this.log('DEBUG', '市场价格查询间隔过短，跳过API查询', {
+            //     timeSinceLastQuery: now - this.lastMarketPriceQueryTime,
+            //     minInterval: this.minQueryInterval
+            // });
+            this.log('DEBUG', '市场价格查询间隔过短，跳过API查询');
             // 返回缓存的价格或默认值
             return { bid: this.currentMarketPrice, ask: this.currentMarketPrice, midPrice: this.currentMarketPrice };
         }
@@ -770,11 +912,11 @@ class ScalpingBot {
                 // 重新创建平仓订单
                 await this.createCloseOrderForPosition(actualPosition);
             } else {
-                this.log('DEBUG', '持仓价值变化未超过阈值，无需更新平仓订单', {
-                    valueChange: valueChange.toFixed(2),
-                    threshold: valueChangeThreshold.toFixed(2),
-                    thresholdPercentage: '20%'
-                });
+                // this.log('INFO', '持仓价值变化未超过阈值，无需更新平仓订单', {
+                //     valueChange: valueChange.toFixed(2),
+                //     threshold: valueChangeThreshold.toFixed(2),
+                //     thresholdPercentage: '20%'
+                // });
             }
             
             // 检查平仓订单数量是否匹配持仓数量
@@ -829,6 +971,24 @@ class ScalpingBot {
      */
     async createCloseOrderForPosition(actualPosition) {
         try {
+            const symbol = this.config.symbol;
+            const now = Date.now();
+            const minInterval = 10000; // 10秒间隔
+            
+            // 检查是否在最小间隔内创建过平仓单
+            if (this.lastCloseOrderCreateTime.has(symbol)) {
+                const timeSinceLastCreate = now - this.lastCloseOrderCreateTime.get(symbol);
+                if (timeSinceLastCreate < minInterval) {
+                    const remainingTime = Math.ceil((minInterval - timeSinceLastCreate) / 1000);
+                    this.log('DEBUG', '平仓单创建间隔过短，跳过创建', {
+                        symbol,
+                        timeSinceLastCreate: Math.round(timeSinceLastCreate / 1000) + 's',
+                        minInterval: minInterval / 1000 + 's',
+                        remainingTime: remainingTime + 's'
+                    });
+                    return;
+                }
+            }
             
             // 先查询是否已有平仓订单
             const existingCloseOrders = await this.getCloseOrdersFromAPI();
@@ -1049,17 +1209,17 @@ class ScalpingBot {
                 // 所有订单（包括平仓订单）都遵循配置中的 postOnly 设置
                 const usePostOnly = postOnly !== null ? postOnly : this.config.postOnly;
                 
-                this.log('INFO', '准备下单', { 
-                    side, 
-                    apiSide,
-                    price, 
-                    quantity, 
-                    symbol: this.config.symbol,
-                    orderType: 'Limit',
-                    reduceOnly,
-                    postOnly: usePostOnly,
-                    retry: retryCount + 1 
-                });
+                // this.log('INFO', '准备下单', { 
+                //     side, 
+                //     apiSide,
+                //     price, 
+                //     quantity, 
+                //     symbol: this.config.symbol,
+                //     orderType: 'Limit',
+                //     reduceOnly,
+                //     postOnly: usePostOnly,
+                //     retry: retryCount + 1 
+                // });
                 
                 const order = await this.client.placeOrder(
                     this.config.symbol,
@@ -1558,18 +1718,19 @@ class ScalpingBot {
         
         // 检查缓存是否有效
         if (this.cachedCloseOrders && (now - this.cachedCloseOrdersTime) < this.cacheValidDuration) {
-            this.log('DEBUG', '使用缓存的平仓订单数据', {
-                cacheAge: now - this.cachedCloseOrdersTime,
-                cacheValidDuration: this.cacheValidDuration,
-                cachedOrdersCount: this.cachedCloseOrders.length,
-                cachedOrderDetails: this.cachedCloseOrders.map(o => ({
-                    id: o.id,
-                    side: o.side,
-                    price: parseFloat(o.price).toFixed(1),
-                    quantity: parseFloat(o.quantity).toFixed(4),
-                    status: o.status
-                }))
-            });
+            // this.log('DEBUG', '使用缓存的平仓订单数据', {
+            //     cacheAge: now - this.cachedCloseOrdersTime,
+            //     cacheValidDuration: this.cacheValidDuration,
+            //     cachedOrdersCount: this.cachedCloseOrders.length,
+            //     cachedOrderDetails: this.cachedCloseOrders.map(o => ({
+            //         id: o.id,
+            //         side: o.side,
+            //         price: parseFloat(o.price).toFixed(1),
+            //         quantity: parseFloat(o.quantity).toFixed(4),
+            //         status: o.status
+            //     }))
+            // });
+            this.log('DEBUG', '使用缓存的平仓订单数据');
             return this.cachedCloseOrders;
         }
         
@@ -1673,6 +1834,9 @@ class ScalpingBot {
      */
     async placeCloseOrder(entryOrderId, entrySide, entryPrice, quantity) {
         try {
+            const symbol = this.config.symbol;
+            const now = Date.now();
+            
             // 防止重复创建，如果已经在创建过程中，直接返回
             if (this.isCreatingCloseOrder) {
                 this.log('DEBUG', '已在创建平仓订单过程中，跳过重复调用', { entryOrderId });
@@ -1817,6 +1981,9 @@ class ScalpingBot {
                     status: 'pending'
                 });
                 
+                // 记录平仓单创建时间
+                this.lastCloseOrderCreateTime.set(symbol, now);
+                
                 this.log('INFO', '平仓单创建成功', {
                     entryOrderId,
                     closeOrderId: closeOrderData.id,
@@ -1954,6 +2121,22 @@ class ScalpingBot {
                 const executedQty = parseFloat(orderData.executedQuantity) || parseFloat(orderData.quantity);
                 const side = orderData.internalSide || (orderData.side === 'Bid' ? 'buy' : 'sell');
                 const price = parseFloat(orderData.price);
+                const entryTime = orderData.timestamp || Date.now();
+                
+                // 记录成交价格和方向
+                recordTradePrice(price, side);
+                
+                // 记录开仓交易历史（用于下一笔开仓时的金额调整）
+                recordTradeHistory(
+                    this.config.symbol,
+                    orderId,
+                    null, // 开仓时没有平仓订单ID
+                    entryTime,
+                    null, // 开仓时没有平仓时间
+                    null, // 开仓时没有持续时间
+                    null  // 开仓时没有盈利
+                );
+                
                 this.log('INFO', '订单成交，更新持仓', {
                     orderId,
                     side,
@@ -1961,7 +2144,9 @@ class ScalpingBot {
                     executedQuantity: orderData.executedQuantity,
                     actualQuantity: executedQty,
                     price,
-                    currentPosition: this.currentPosition
+                    currentPosition: this.currentPosition,
+                    lastTradeRecorded: `${side} at ${formatPriceWithGlobalPrecision(price)}`,
+                    tradeHistoryRecorded: true
                 });
                 this.updatePosition(side, executedQty, price, false);
                 
@@ -2072,7 +2257,19 @@ class ScalpingBot {
      */
     async handleCloseOrderCompletion(entryOrderId, closeOrderData) {
         try {
-            this.log('INFO', '平仓订单完成', { 
+            // 检查是否已经处理过这个平仓订单，避免重复处理
+            const closeOrderKey = `${entryOrderId}_${closeOrderData.id}`;
+            if (this.processedCloseOrders && this.processedCloseOrders.has(closeOrderKey)) {
+                return;
+            }
+            
+            // 记录已处理的平仓订单
+            if (!this.processedCloseOrders) {
+                this.processedCloseOrders = new Set();
+            }
+            this.processedCloseOrders.add(closeOrderKey);
+            
+            this.log('INFO', '新建平仓订单完成', { 
                 entryOrderId, 
                 closeOrderId: closeOrderData.id, 
                 status: closeOrderData.status 
@@ -2084,6 +2281,10 @@ class ScalpingBot {
                 const executedQty = parseFloat(closeOrderData.executedQuantity) || parseFloat(closeOrderData.quantity);
                 const closeSide = closeOrderData.side === 'Bid' ? 'buy' : 'sell';
                 const closePrice = parseFloat(closeOrderData.price);
+                
+                // 记录成交价格和方向
+                recordTradePrice(closePrice, closeSide);
+                
                 this.log('INFO', '平仓订单成交，更新持仓', {
                     closeOrderId: closeOrderData.id,
                     closeSide,
@@ -2091,7 +2292,8 @@ class ScalpingBot {
                     executedQuantity: closeOrderData.executedQuantity,
                     actualQuantity: executedQty,
                     closePrice,
-                    currentPosition: this.currentPosition
+                    currentPosition: this.currentPosition,
+                    lastTradeRecorded: `${closeSide} at ${formatPriceWithGlobalPrecision(closePrice)}`
                 });
                 this.updatePosition(closeSide, executedQty, closePrice, true);
             }
@@ -2104,11 +2306,56 @@ class ScalpingBot {
                 if (actualProfit > 0) {
                     this.stats.successfulOrders++;
                     this.stats.totalProfit += actualProfit;
+                    
+                    // 更新交易历史记录（将开仓记录更新为完整交易记录）
+                    const entryTime = entryOrder.timestamp || Date.now();
+                    const closeTime = Date.now();
+                    const duration = closeTime - entryTime;
+                    
+                    // 查找并更新对应的开仓记录
+                    let updated = false;
+                    for (let i = tradeHistory.length - 1; i >= 0; i--) {
+                        const trade = tradeHistory[i];
+                        if (trade.symbol === this.config.symbol && 
+                            trade.entryOrderId === entryOrderId && 
+                            !trade.isComplete) {
+                            // 更新为完整交易记录
+                            trade.closeOrderId = closeOrderData.id;
+                            trade.closeTime = closeTime;
+                            trade.duration = duration;
+                            trade.profit = actualProfit;
+                            trade.isComplete = true;
+                            updated = true;
+                            console.log(`更新交易历史记录: entryOrderId=${entryOrderId}, closeOrderId=${closeOrderData.id}, duration=${duration}ms`);
+                            break;
+                        }
+                    }
+                    
+                    // 如果没有找到对应的开仓记录，创建新的完整记录
+                    if (!updated) {
+                        recordTradeHistory(
+                            this.config.symbol,
+                            entryOrderId,
+                            closeOrderData.id,
+                            entryTime,
+                            closeTime,
+                            duration,
+                            actualProfit
+                        );
+                        console.log(`创建新的完整交易记录: entryOrderId=${entryOrderId}, closeOrderId=${closeOrderData.id}`);
+                    }
+                    
+                    // 清空成交价格记录（持仓平仓成功）
+                    clearTradePrice();
+                    
                     this.log('INFO', '平仓成功', { 
                         entryOrderId, 
                         closeOrderId: closeOrderData.id,
                         actualProfit,
-                        newPosition: this.currentPosition
+                        newPosition: this.currentPosition,
+                        tradePriceCleared: true,
+                        tradeDuration: `${(duration / 1000).toFixed(1)}秒`,
+                        tradeDurationMinutes: (duration / (1000 * 60)).toFixed(2)
                     });
                     
                     // 记录平仓交易
@@ -2349,77 +2596,100 @@ class ScalpingBot {
             // 获取市场价格
             const { bid, ask } = await this.getCurrentPrice();
 
+            // 获取实际持仓信息
+            const currentPosition = await this.getActualPositionInfo();
+            const isNewPosition = !currentPosition || currentPosition.positionValue === 0;
+            
             // 计算订单参数 - 直接使用买1或卖1价格
             const side = this.config.tradeDirection;
             const price = this.calculateOrderPrice(bid, ask, side);
-            const quantity = await this.calculateOrderQuantityWithPrecision(price);
+            
+            // 根据是否为开仓调整订单金额
+            let quantity;
+            if (isNewPosition) {
+                // 从无到有的开仓，使用动态调整的金额
+                this.log('DEBUG', '检测到开仓机会，使用动态调整金额', {
+                    positionValue: currentPosition ? currentPosition.positionValue : 0,
+                    isNewPosition: true
+                });
+                quantity = await this.calculateOrderQuantityWithPrecision(price);
+            } else {
+                // 已有持仓，使用基础金额
+                // this.log('INFO', '已有持仓，使用基础金额', {
+                //     positionValue: currentPosition.positionValue,
+                //     isNewPosition: false
+                // });
+                quantity = await this.calculateOrderQuantityWithPrecision(price, true); // 传入true表示使用基础金额
+            }
 
             // 转换side格式
             const apiSide = side === 'buy' ? 'Bid' : 'Ask';
 
-            // 检查持仓价格控制 - 确保有足够价差来盈利
-            const actualPosition = await this.getActualPositionInfo();
-            if (actualPosition && actualPosition.positionValue > 0) {
-                const entryPrice = parseFloat(actualPosition.entryPrice);
-                const newOrderPrice = parseFloat(price);
-                const minDifference = this.config.minPriceDifference / 100; // 转换为小数
-                
-                // 计算价格差异百分比
-                const priceDifferencePercent = Math.abs(newOrderPrice - entryPrice) / entryPrice;
-                
-                if (side === 'buy') {
-                    // 买单：新价格需要比持仓入场价格至少低 minPriceDifference%
-                    const requiredPrice = entryPrice * (1 - minDifference);
-                    if (newOrderPrice > requiredPrice) {
-                        this.log('WARN', '新买单价格价差不足，跳过下单', {
-                            entryPrice: entryPrice.toFixed(1),
-                            newOrderPrice: newOrderPrice.toFixed(1),
-                            requiredPrice: requiredPrice.toFixed(1),
-                            priceDifferencePercent: (priceDifferencePercent * 100).toFixed(3) + '%',
-                            minRequiredDifference: this.config.minPriceDifference + '%',
-                            positionSide: actualPosition.side,
-                            positionValue: actualPosition.positionValue.toFixed(2),
-                            reason: `买单价格需要比入场价低至少${this.config.minPriceDifference}%来确保盈利`
-                        });
-                        return;
+            // 检查价格差异控制 - 只有在有持仓时才检查与上一笔同方向交易的价差
+            if (!isNewPosition) {
+                const lastTradeInfo = getLastTradeInfo();
+                if (lastTradeInfo.price && lastTradeInfo.side === side) {
+                    const lastPrice = lastTradeInfo.price;
+                    const newOrderPrice = parseFloat(price);
+                    const minDifference = this.config.minPriceDifference / 100; // 转换为小数
+                    
+                    // 计算价格差异百分比
+                    const priceDifferencePercent = Math.abs(newOrderPrice - lastPrice) / lastPrice;
+                    
+                    if (side === 'buy') {
+                        // 买单：新价格需要比上一笔买单价格至少低 minPriceDifference%
+                        const requiredPrice = lastPrice * (1 - minDifference);
+                        if (newOrderPrice > requiredPrice) {
+                            this.log('INFO', '新买单价格价差不足，跳过下单', {
+                                lastTradePrice: formatPriceWithGlobalPrecision(lastPrice),
+                                newOrderPrice: formatPriceWithGlobalPrecision(newOrderPrice),
+                                requiredPrice: formatPriceWithGlobalPrecision(requiredPrice),
+                                priceDifferencePercent: (priceDifferencePercent * 100).toFixed(3) + '%',
+                                minRequiredDifference: this.config.minPriceDifference + '%',
+                                reason: `买单价格需要比上一笔买单价格低至少${this.config.minPriceDifference}%`
+                            });
+                            return;
+                        }
                     }
-                }
-                
-                if (side === 'sell') {
-                    // 卖单：新价格需要比持仓入场价格至少高 minPriceDifference%
-                    const requiredPrice = entryPrice * (1 + minDifference);
-                    if (newOrderPrice < requiredPrice) {
-                        this.log('WARN', '新卖单价格价差不足，跳过下单', {
-                            entryPrice: entryPrice.toFixed(1),
-                            newOrderPrice: newOrderPrice.toFixed(1),
-                            requiredPrice: requiredPrice.toFixed(1),
-                            priceDifferencePercent: (priceDifferencePercent * 100).toFixed(3) + '%',
-                            minRequiredDifference: this.config.minPriceDifference + '%',
-                            positionSide: actualPosition.side,
-                            positionValue: actualPosition.positionValue.toFixed(2),
-                            reason: `卖单价格需要比入场价高至少${this.config.minPriceDifference}%来确保盈利`
-                        });
-                        return;
+                    
+                    if (side === 'sell') {
+                        // 卖单：新价格需要比上一笔卖单价格至少高 minPriceDifference%
+                        const requiredPrice = lastPrice * (1 + minDifference);
+                        if (newOrderPrice < requiredPrice) {
+                            this.log('INFO', '新卖单价格价差不足，跳过下单', {
+                                lastTradePrice: formatPriceWithGlobalPrecision(lastPrice),
+                                newOrderPrice: formatPriceWithGlobalPrecision(newOrderPrice),
+                                requiredPrice: formatPriceWithGlobalPrecision(requiredPrice),
+                                priceDifferencePercent: (priceDifferencePercent * 100).toFixed(3) + '%',
+                                minRequiredDifference: this.config.minPriceDifference + '%',
+                                reason: `卖单价格需要比上一笔卖单价格高至少${this.config.minPriceDifference}%`
+                            });
+                            return;
+                        }
                     }
+                    
+                    this.log('DEBUG', '新订单价格检查通过', {
+                        lastTradePrice: formatPriceWithGlobalPrecision(lastPrice),
+                        newOrderPrice: formatPriceWithGlobalPrecision(newOrderPrice),
+                        side,
+                        priceDifference: side === 'buy' ? 
+                            formatPriceWithGlobalPrecision(newOrderPrice - lastPrice) : 
+                            formatPriceWithGlobalPrecision(lastPrice - newOrderPrice)
+                    });
                 }
-                
-                this.log('DEBUG', '新订单价格检查通过', {
-                    entryPrice: formatPriceWithGlobalPrecision(entryPrice),
-                    newOrderPrice: formatPriceWithGlobalPrecision(newOrderPrice),
-                    side,
-                    positionSide: actualPosition.side,
-                    priceDifference: side === 'buy' ? 
-                        formatPriceWithGlobalPrecision(newOrderPrice - entryPrice) : 
-                        formatPriceWithGlobalPrecision(entryPrice - newOrderPrice)
+            } else {
+                this.log('DEBUG', '开仓操作，跳过价格差异检查', {
+                    isNewPosition: true,
+                    positionValue: currentPosition ? currentPosition.positionValue : 0
                 });
             }
             
             // 检查是否达到单币种持仓最大金额限制
-            if (actualPosition && actualPosition.positionValue > 0) {
+            if (currentPosition && currentPosition.positionValue > 0) {
                 // 检查当前持仓价值是否已达到限制
-                if (actualPosition.positionValue >= this.config.maxPositionValue) {
+                if (currentPosition.positionValue >= this.config.maxPositionValue) {
                     this.log('INFO', '已达到单币种持仓最大金额限制', {
-                        currentPositionValue: actualPosition.positionValue.toFixed(2),
+                        currentPositionValue: currentPosition.positionValue.toFixed(2),
                         maxPositionValue: this.config.maxPositionValue,
                         symbol: this.config.symbol,
                         unit: 'USDC'
@@ -2429,17 +2699,17 @@ class ScalpingBot {
                 
                 // 检查新订单是否会超过限制
                 const newOrderValue = this.config.orderAmount;
-                const projectedPositionValue = actualPosition.positionValue + newOrderValue;
+                const projectedPositionValue = currentPosition.positionValue + newOrderValue;
                 
                 if (projectedPositionValue > this.config.maxPositionValue) {
-                    this.log('INFO', '新订单将超过持仓金额限制，跳过下单', {
-                        currentPositionValue: actualPosition.positionValue.toFixed(2),
-                        newOrderValue,
-                        projectedPositionValue: projectedPositionValue.toFixed(2),
-                        maxPositionValue: this.config.maxPositionValue,
-                        symbol: this.config.symbol,
-                        unit: 'USDC'
-                    });
+                    // this.log('INFO', '新订单将超过持仓金额限制，跳过下单', {
+                    //     currentPositionValue: currentPosition.positionValue.toFixed(2),
+                    //     newOrderValue,
+                    //     projectedPositionValue: projectedPositionValue.toFixed(2),
+                    //     maxPositionValue: this.config.maxPositionValue,
+                    //     symbol: this.config.symbol,
+                    //     unit: 'USDC'
+                    // });
                     return;
                 }
             }
@@ -2500,12 +2770,13 @@ class ScalpingBot {
                 
                 if (hasPosition && timeSinceLastOrder < waitTime) {
                     const remainingTime = Math.ceil((waitTime - timeSinceLastOrder) / 1000);
-                    this.log('DEBUG', '有持仓但等待时间未到，跳过下单', { 
-                        timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
-                        waitTime: this.config.orderWaitTime,
-                        remainingTime,
-                        hasPosition
-                    });
+                    // this.log('DEBUG', '有持仓但等待时间未到，跳过下单', { 
+                    //     timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
+                    //     waitTime: this.config.orderWaitTime,
+                    //     remainingTime,
+                    //     hasPosition
+                    // });
+                    this.log('DEBUG', '有持仓但等待时间未到，跳过下单');
                     return;
                 } else if (!hasPosition) {
                     // 没有持仓时，应该立即下单，不受等待时间限制
@@ -2514,17 +2785,17 @@ class ScalpingBot {
                 }
             }
 
-            this.log('INFO', '准备下新单', { 
-                side, 
-                apiSide,
-                price, 
-                quantity, 
-                bid, 
-                ask,
-                activeOrders: this.activeOrders.size,
-                timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
-                skipWaitTime
-            });
+            // this.log('INFO', '准备下新单', { 
+            //     side, 
+            //     apiSide,
+            //     price, 
+            //     quantity, 
+            //     bid, 
+            //     ask,
+            //     activeOrders: this.activeOrders.size,
+            //     timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
+            //     skipWaitTime
+            // });
 
             // 记录下单前的持仓金额，用于后续判断订单是否有效成交
             const positionBeforeOrder = await this.getActualPositionInfo();
