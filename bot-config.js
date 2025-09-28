@@ -43,7 +43,12 @@ module.exports = {
         postOnly: process.env.POST_ONLY !== 'false',
         
         // 最小价格差异要求（确保有足够价差来盈利）
-        minPriceDifference: parseFloat(process.env.MIN_PRICE_DIFFERENCE) || 0.00015
+        minPriceDifference: parseFloat(process.env.MIN_PRICE_DIFFERENCE) || 0.00015,
+        
+        // 时间段配置 (UTC+8)
+        enableTimeSlot: process.env.ENABLE_TIME_SLOT !== 'false',
+        timeSlotStart: process.env.TIME_SLOT_START || '09:00',
+        timeSlotEnd: process.env.TIME_SLOT_END || '17:00'
     },
     
     // ================ 日志配置 ================

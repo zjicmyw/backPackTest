@@ -112,12 +112,13 @@ function getLastTradeHistory(symbol) {
     return null;
 }
 
-/**
- * 根据上一笔交易持续时间计算订单金额倍数
- * @param {string} symbol - 交易对符号
- * @param {number} baseOrderAmount - 基础订单金额
- * @returns {number} 调整后的订单金额
- */
+
+    /**
+     * 根据上一笔交易持续时间计算订单金额倍数
+     * @param {string} symbol - 交易对符号
+     * @param {number} baseOrderAmount - 基础订单金额
+     * @returns {number} 调整后的订单金额
+     */
 function calculateOrderAmountMultiplier(symbol, baseOrderAmount) {
     const lastTrade = getLastTradeHistory(symbol);
     
@@ -186,6 +187,11 @@ class ScalpingBot {
             
             // 价格差异要求（确保有足够价差来盈利）
             minPriceDifference: config.minPriceDifference || 0.00015, // 最小价格差异百分比，默认0.015%
+            
+            // 时间段配置 (UTC+8)
+            enableTimeSlot: config.trading?.enableTimeSlot !== false, // 启用时间段配置
+            timeSlotStart: config.trading?.timeSlotStart || '09:00', // 特殊时间段开始时间
+            timeSlotEnd: config.trading?.timeSlotEnd || '17:00', // 特殊时间段结束时间
             
             // 日志配置
             logLevel: config.logLevel || 'INFO', // DEBUG, INFO, WARN, ERROR
@@ -444,16 +450,123 @@ class ScalpingBot {
     }
 
     /**
+     * 检查当前是否在特殊时间段内
+     * @returns {object} {isInTimeSlot: boolean, isWeekend: boolean, timeInfo: object}
+     */
+    isInSpecialTimeSlot() {
+        if (!this.config.enableTimeSlot) {
+            return { isInTimeSlot: false, isWeekend: false, timeInfo: null };
+        }
+
+        // 获取UTC+8时间
+        const now = new Date();
+        const utc8Time = new Date(now.getTime() + (8 * 60 * 60 * 1000));
+        const dayOfWeek = utc8Time.getDay(); // 0=周日, 1=周一, ..., 6=周六
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6; // 周六或周日
+        
+        // 获取当前时间 (HH:MM格式)
+        const currentTime = utc8Time.getHours().toString().padStart(2, '0') + ':' + 
+                           utc8Time.getMinutes().toString().padStart(2, '0');
+        
+        // 解析配置的时间段
+        const [startHour, startMin] = this.config.timeSlotStart.split(':').map(Number);
+        const [endHour, endMin] = this.config.timeSlotEnd.split(':').map(Number);
+        
+        const startMinutes = startHour * 60 + startMin;
+        const endMinutes = endHour * 60 + endMin;
+        const currentMinutes = utc8Time.getHours() * 60 + utc8Time.getMinutes();
+        
+        // 判断是否在时间段内
+        let isInTimeSlot = false;
+        if (startMinutes <= endMinutes) {
+            // 同一天内的时间段 (如 09:00-17:00)
+            isInTimeSlot = currentMinutes >= startMinutes && currentMinutes < endMinutes;
+        } else {
+            // 跨天的时间段 (如 22:00-06:00)
+            isInTimeSlot = currentMinutes >= startMinutes || currentMinutes < endMinutes;
+        }
+        
+        const timeInfo = {
+            currentTime,
+            timeSlotStart: this.config.timeSlotStart,
+            timeSlotEnd: this.config.timeSlotEnd,
+            dayOfWeek: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][dayOfWeek],
+            isWeekend
+        };
+        
+        return { isInTimeSlot, isWeekend, timeInfo };
+    }
+
+    /**
+     * 根据时间段和星期几获取动态配置
+     * @returns {object} {orderAmountMultiplier: number, priceDifferenceMultiplier: number}
+     */
+    getDynamicConfig() {
+        const { isInTimeSlot, isWeekend, timeInfo } = this.isInSpecialTimeSlot();
+        
+        if (!this.config.enableTimeSlot) {
+            return { orderAmountMultiplier: 1.0, priceDifferenceMultiplier: 1.0 };
+        }
+        
+        let orderAmountMultiplier = 1.0;
+        let priceDifferenceMultiplier = 1.0;
+        
+        if (isWeekend) {
+            // 周末特殊处理
+            if (isInTimeSlot) {
+                // 周末 + 特殊时间段
+                orderAmountMultiplier = 1.44;
+                priceDifferenceMultiplier = 0.25;
+            } else {
+                // 周末 + 非特殊时间段
+                orderAmountMultiplier = 1.2;
+                priceDifferenceMultiplier = 0.5;
+            }
+        } else {
+            // 工作日
+            if (isInTimeSlot) {
+                // 工作日 + 特殊时间段
+                orderAmountMultiplier = 1.2;
+                priceDifferenceMultiplier = 0.5;
+            } else {
+                // 工作日 + 非特殊时间段
+                orderAmountMultiplier = 1.0;
+                priceDifferenceMultiplier = 1.0;
+            }
+        }
+        
+        this.log('DEBUG', '动态配置计算', {
+            ...timeInfo,
+            isInTimeSlot,
+            isWeekend,
+            orderAmountMultiplier,
+            priceDifferenceMultiplier
+        });
+        
+        return { orderAmountMultiplier, priceDifferenceMultiplier };
+    }
+
+    /**
      * 根据市场精度计算订单数量
      * @param {number} price - 订单价格
      * @param {boolean} useBaseAmount - 是否使用基础金额（不进行动态调整）
      * @returns {Promise<string>} 格式化后的数量
      */
     async calculateOrderQuantityWithPrecision(price, useBaseAmount = false) {
+        // 获取动态配置
+        const { orderAmountMultiplier } = this.getDynamicConfig();
+        
         // 根据上一笔交易持续时间调整订单金额
-        const adjustedOrderAmount = useBaseAmount ? 
-            this.config.orderAmount : 
-            calculateOrderAmountMultiplier(this.config.symbol, this.config.orderAmount);
+        let tradeHistoryAdjustedAmount;
+        if (useBaseAmount) {
+            tradeHistoryAdjustedAmount = this.config.orderAmount;
+        } else {
+            tradeHistoryAdjustedAmount = calculateOrderAmountMultiplier(this.config.symbol, this.config.orderAmount);
+        }
+        
+        // 综合调整：交易历史调整后的金额 * 时间段倍数
+        const adjustedOrderAmount = tradeHistoryAdjustedAmount * orderAmountMultiplier;
+        
         const quantity = adjustedOrderAmount / price;
         
         try {
@@ -478,14 +591,11 @@ class ScalpingBot {
             this.log('DEBUG', '计算订单数量', {
                 isNewPosition: !useBaseAmount,
                 baseOrderAmount: this.config.orderAmount,
-                adjustedOrderAmount: adjustedOrderAmount,
-                multiplier: adjustedOrderAmount / this.config.orderAmount,
+                tradeHistoryAdjustedAmount: tradeHistoryAdjustedAmount,
+                timeSlotMultiplier: orderAmountMultiplier,
+                finalAdjustedAmount: adjustedOrderAmount,
                 price: price,
-                // calculatedQuantity: quantity,
-                // quantityPrecision: quantityPrecision,
-                // formattedQuantity: formattedQuantity,
                 symbol: this.config.symbol,
-                // minQuantity: minQuantity,
                 amountType: useBaseAmount ? '基础金额' : '动态调整金额'
             });
             
@@ -1351,13 +1461,49 @@ class ScalpingBot {
                 }
                 
                 if (isReduceOnlyError) {
-                    this.log('WARN', 'ReduceOnly订单错误，重新获取持仓信息调整数量', { 
+                    this.log('WARN', 'ReduceOnly订单错误，撤销原平仓单并重新创建', { 
                         error: error.message, 
                         side, 
                         originalQuantity: quantity, 
                         retry: retryCount,
                         isCloseOrder
                     });
+                    
+                    // 如果是平仓订单，先撤销所有现有的平仓订单
+                    if (isCloseOrder) {
+                        try {
+                            const existingCloseOrders = await this.getCloseOrdersFromAPI();
+                            this.log('INFO', '撤销现有平仓订单', {
+                                existingOrdersCount: existingCloseOrders.length,
+                                side: side
+                            });
+                            
+                            for (const order of existingCloseOrders) {
+                                if (order.side === side) {
+                                    try {
+                                        await this.cancelOrder(order.id);
+                                        this.log('INFO', '撤销平仓订单成功', {
+                                            orderId: order.id,
+                                            side: order.side,
+                                            quantity: order.quantity
+                                        });
+                                    } catch (cancelError) {
+                                        this.log('WARN', '撤销平仓订单失败', {
+                                            orderId: order.id,
+                                            error: cancelError.message
+                                        });
+                                    }
+                                }
+                            }
+                            
+                            // 等待一下确保撤销完成
+                            await this.sleep(1000);
+                        } catch (error) {
+                            this.log('ERROR', '撤销平仓订单时出错', {
+                                error: error.message
+                            });
+                        }
+                    }
                     
                     // 重新获取实际持仓信息
                     const actualPosition = await this.getActualPositionInfo();
@@ -1380,7 +1526,7 @@ class ScalpingBot {
                         return null;
                     }
                     
-                    // 调整数量为实际持仓数量，使用正确的精度
+                    // 使用实际持仓数量重新下单
                     let adjustedQuantity;
                     try {
                         const precisionInfo = await this.getMarketPrecision(this.config.symbol);
@@ -1398,17 +1544,18 @@ class ScalpingBot {
                         return null;
                     }
                     
-                    this.log('INFO', '调整平仓数量重新下单', {
+                    this.log('INFO', '使用实际持仓数量重新创建平仓订单', {
                         originalQuantity: quantity,
                         adjustedQuantity,
                         positionSide: actualPosition.side,
-                        positionValue: actualPosition.positionValue
+                        positionValue: actualPosition.positionValue,
+                        isCloseOrder
                     });
                     
                     // 使用调整后的数量
                     quantity = adjustedQuantity;
                     
-                    retryCount--; // 不计入重试次数，因为是数量调整
+                    retryCount--; // 不计入重试次数，因为是重新创建
                     await this.sleep(500); // 短暂等待
                     continue;
                 }
@@ -2631,7 +2778,10 @@ class ScalpingBot {
                 if (lastTradeInfo.price && lastTradeInfo.side === side) {
                     const lastPrice = lastTradeInfo.price;
                     const newOrderPrice = parseFloat(price);
-                    const minDifference = this.config.minPriceDifference / 100; // 转换为小数
+                    
+                    // 获取动态配置
+                    const { priceDifferenceMultiplier } = this.getDynamicConfig();
+                    const minDifference = (this.config.minPriceDifference * priceDifferenceMultiplier) / 100; // 转换为小数
                     
                     // 计算价格差异百分比
                     const priceDifferencePercent = Math.abs(newOrderPrice - lastPrice) / lastPrice;
