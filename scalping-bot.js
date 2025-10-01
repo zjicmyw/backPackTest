@@ -10,7 +10,241 @@ let lastTradePrice = null; // 上一次成交价格
 let lastTradeSide = null; // 上一次成交方向 ('buy' 或 'sell')
 
 // 全局交易历史记录
-let tradeHistory = []; // 存储交易历史记录
+let tradeHistory = []; // 存储交易历史记录（保留旧系统兼容性）
+
+// 全局变量：保存最近1次持仓的开仓和平仓时间
+let lastPositionEntryTime = null; // 最近1次开仓时间
+let lastPositionCloseTime = null; // 最近1次平仓时间
+let lastPositionDuration = null; // 最近1次持仓持续时间（毫秒）
+let orderAmountMultiplierCache = null; // 缓存的订单金额倍数
+let orderAmountMultiplierExpiry = null; // 倍数过期时间
+
+/**
+ * 记录开仓时间
+ * @param {number} entryTime - 开仓时间戳
+ */
+function recordPositionEntry(entryTime) {
+    lastPositionEntryTime = entryTime;
+    console.log(`📝 记录开仓时间: ${new Date(entryTime).toLocaleString()}`);
+}
+
+/**
+ * 记录平仓时间并计算持续时间
+ * @param {number} closeTime - 平仓时间戳
+ */
+function recordPositionClose(closeTime) {
+    lastPositionCloseTime = closeTime;
+    
+    if (lastPositionEntryTime) {
+        lastPositionDuration = closeTime - lastPositionEntryTime;
+        console.log(`📝 记录平仓时间: ${new Date(closeTime).toLocaleString()}`);
+        console.log(`📊 持仓持续时间: ${(lastPositionDuration / 1000).toFixed(1)}秒 (${(lastPositionDuration / 60000).toFixed(2)}分钟)`);
+        
+        // 清除旧的订单金额倍数缓存，因为持续时间已更新
+        orderAmountMultiplierCache = null;
+        orderAmountMultiplierExpiry = null;
+        console.log(`🔄 持续时间更新，已清除订单金额倍数缓存`);
+    } else {
+        console.log(`⚠️ 记录平仓时间但没有对应的开仓时间`);
+    }
+}
+
+/**
+ * 获取最近1次持仓信息
+ * @returns {object} 持仓信息
+ */
+function getLastPositionInfo() {
+    return {
+        entryTime: lastPositionEntryTime,
+        closeTime: lastPositionCloseTime,
+        duration: lastPositionDuration
+    };
+}
+
+/**
+ * 根据持续时间获取订单金额倍数（有效期5分钟）
+ * @param {object} config - 配置对象
+ * @returns {number} 订单金额倍数
+ */
+function getOrderAmountMultiplier(config) {
+    const now = Date.now();
+    
+    // 检查缓存是否有效（5分钟内）
+    if (orderAmountMultiplierCache && orderAmountMultiplierExpiry && now < orderAmountMultiplierExpiry) {
+        console.log(`📋 使用缓存的订单金额倍数: ${orderAmountMultiplierCache}x (剩余${Math.round((orderAmountMultiplierExpiry - now) / 1000)}秒)`);
+        return orderAmountMultiplierCache;
+    }
+    
+    // 如果没有持续时间数据，使用默认倍数1
+    if (!lastPositionDuration) {
+        console.log(`📋 没有持续时间数据，使用默认倍数: 1x`);
+        return 1;
+    }
+    
+    // 将持续时间转换为分钟
+    const durationMinutes = lastPositionDuration / (60 * 1000);
+    console.log(`📊 上次持仓持续时间: ${durationMinutes.toFixed(2)}分钟`);
+    
+    let multiplier = 1;
+    
+    // 根据配置的持续时间区间确定倍数
+    console.log(`📊 配置信息:`, {
+        durationMultiplier0to1: config.durationMultiplier0to1,
+        durationMultiplier1to3: config.durationMultiplier1to3,
+        durationMultiplier3to5: config.durationMultiplier3to5
+    });
+    
+    if (config.durationMultiplier0to1 && durationMinutes >= 0 && durationMinutes < 1) {
+        multiplier = config.durationMultiplier0to1;
+        console.log(`📊 匹配0-1分钟区间，使用倍数: ${multiplier}`);
+    } else if (config.durationMultiplier1to3 && durationMinutes >= 1 && durationMinutes < 3) {
+        multiplier = config.durationMultiplier1to3;
+        console.log(`📊 匹配1-3分钟区间，使用倍数: ${multiplier}`);
+    } else if (config.durationMultiplier3to5 && durationMinutes >= 3 && durationMinutes < 5) {
+        multiplier = config.durationMultiplier3to5;
+        console.log(`📊 匹配3-5分钟区间，使用倍数: ${multiplier}`);
+    } else if (durationMinutes >= 5) {
+        multiplier = 1; // 5分钟以上使用默认倍数
+        console.log(`📊 超过5分钟，使用默认倍数: ${multiplier}`);
+    } else {
+        console.log(`📊 没有匹配任何区间，使用默认倍数: ${multiplier}`);
+    }
+    
+    // 缓存倍数，有效期5分钟
+    orderAmountMultiplierCache = multiplier;
+    orderAmountMultiplierExpiry = now + (5 * 60 * 1000); // 5分钟后过期
+    
+    console.log(`📋 计算订单金额倍数: ${multiplier}x (有效期5分钟)`);
+    return multiplier;
+}
+
+/**
+ * 通过API获取最近1次完整的持仓历史（开仓到平仓）
+ * @param {string} symbol - 交易对符号
+ * @param {object} client - API客户端
+ * @param {string} tradeDirection - 交易方向 ('buy' 或 'sell')
+ * @returns {Promise<object|null>} 持仓历史信息
+ */
+async function fetchLastPositionFromAPI(symbol, client, tradeDirection = 'buy') {
+    try {
+        console.log(`🔍 通过API获取 ${symbol} 的最近持仓历史...`);
+        
+        // 获取最近60分钟的成交记录
+        const fromTime = Date.now() - (30 * 60 * 1000);
+        const fills = await client.getFillHistory({
+            symbol: symbol,
+            from: fromTime,
+            to: Date.now()
+        });
+        
+        console.log(`📊 API返回成交记录: ${fills.length} 条`);
+        
+        if (fills.length === 0) {
+            console.log(`❌ 没有找到成交记录`);
+            return null;
+        }
+        
+        // 打印所有成交记录的详细信息
+        console.log(`📋 所有成交记录详情:`);
+        fills.forEach((fill, index) => {
+            console.log(`  ${index + 1}. 订单ID: ${fill.orderId} | 方向: ${fill.side} | 价格: ${fill.price} | 数量: ${fill.quantity} | 时间: ${fill.timestamp}`);
+            console.log(`     订单ID长度: ${fill.orderId.length} | 包含close: ${fill.orderId.includes('close')} | 包含position_: ${fill.orderId.includes('position_')}`);
+        });
+        
+        // 按时间排序（从早到晚）
+        const sortedFills = fills.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        
+        console.log(`📋 按时间排序后的成交记录:`);
+        sortedFills.forEach((fill, index) => {
+            console.log(`  ${index + 1}. ${fill.orderId} - ${fill.side} - ${fill.quantity}@${fill.price} - ${fill.timestamp}`);
+        });
+        
+        // 查找最近的完整持仓周期（开仓 -> 平仓）
+        let entryFill = null;
+        let closeFill = null;
+        
+        console.log(`🔍 开始分析成交记录，寻找完整持仓周期...`);
+        console.log(`📊 交易方向: ${tradeDirection} (${tradeDirection === 'buy' ? '做多，Ask为平仓' : '做空，Bid为平仓'})`);
+        
+        // 根据交易方向确定平仓和开仓的方向
+        const closeSide = tradeDirection === 'buy' ? 'Ask' : 'Bid'; // 平仓方向
+        const entrySide = tradeDirection === 'buy' ? 'Bid' : 'Ask'; // 开仓方向
+        
+        console.log(`📊 预期开仓方向: ${entrySide}, 预期平仓方向: ${closeSide}`);
+        
+        // 从最新的成交记录开始往前查找
+        for (let i = sortedFills.length - 1; i >= 0; i--) {
+            const fill = sortedFills[i];
+            
+            if (!closeFill) {
+                // 寻找平仓记录（方向匹配平仓方向）
+                const isCorrectDirection = fill.side === closeSide;
+                const isLongId = fill.orderId.length > 15;
+                const hasCloseKeyword = fill.orderId.includes('close');
+                const hasPositionKeyword = fill.orderId.includes('position_');
+                
+                console.log(`  分析订单 ${fill.orderId} (${fill.side}):`);
+                console.log(`    方向匹配平仓: ${isCorrectDirection} (${fill.side} === ${closeSide})`);
+                console.log(`    ID长度: ${fill.orderId.length} (>15: ${isLongId})`);
+                console.log(`    包含'close': ${hasCloseKeyword}`);
+                console.log(`    包含'position_': ${hasPositionKeyword}`);
+                
+                // 平仓记录的判断：方向正确即可（因为很多平仓订单ID没有特殊标识）
+                const isCloseCandidate = isCorrectDirection;
+                console.log(`    是否平仓候选: ${isCloseCandidate}`);
+                
+                if (isCloseCandidate) {
+                    closeFill = fill;
+                    console.log(`🔍 ✅ 找到平仓记录: ${fill.orderId} - ${fill.side} - ${fill.quantity}@${fill.price} - ${fill.timestamp}`);
+                } else {
+                    console.log(`    ❌ 不是平仓记录`);
+                }
+            } else if (!entryFill) {
+                // 寻找对应的开仓记录（在平仓之前，方向为开仓方向）
+                const isCorrectDirection = fill.side === entrySide;
+                const isBeforeClose = new Date(fill.timestamp) < new Date(closeFill.timestamp);
+                
+                console.log(`  检查开仓候选 ${fill.orderId} (${fill.side}):`);
+                console.log(`    方向匹配开仓: ${isCorrectDirection} (${fill.side} === ${entrySide})`);
+                console.log(`    时间在平仓前: ${isBeforeClose}`);
+                
+                if (isCorrectDirection && isBeforeClose) {
+                    entryFill = fill;
+                    console.log(`🔍 ✅ 找到开仓记录: ${fill.orderId} - ${fill.side} - ${fill.quantity}@${fill.price} - ${fill.timestamp}`);
+                    break;
+                } else {
+                    console.log(`    ❌ 不匹配开仓条件`);
+                }
+            }
+        }
+        
+        if (entryFill && closeFill) {
+            const entryTime = new Date(entryFill.timestamp).getTime();
+            const closeTime = new Date(closeFill.timestamp).getTime();
+            const duration = closeTime - entryTime;
+            
+            console.log(`✅ 找到完整持仓历史:`);
+            console.log(`   开仓: ${entryFill.orderId} - ${new Date(entryTime).toLocaleString()}`);
+            console.log(`   平仓: ${closeFill.orderId} - ${new Date(closeTime).toLocaleString()}`);
+            console.log(`   持续时间: ${(duration / 1000).toFixed(1)}秒 (${(duration / 60000).toFixed(2)}分钟)`);
+            
+            return {
+                entryTime,
+                closeTime,
+                duration,
+                entryFill,
+                closeFill
+            };
+        } else {
+            console.log(`❌ 没有找到完整的持仓历史`);
+            return null;
+        }
+        
+    } catch (error) {
+        console.error(`❌ 获取持仓历史失败: ${error.message}`);
+        return null;
+    }
+}
 
 /**
  * 设置全局价格精度
@@ -69,23 +303,77 @@ function getLastTradeInfo() {
  * @param {number|null} profit - 盈利金额（开仓时为null）
  */
 function recordTradeHistory(symbol, entryOrderId, closeOrderId, entryTime, closeTime, duration, profit) {
-    const tradeRecord = {
-        symbol,
-        entryOrderId,
-        closeOrderId,
-        entryTime,
-        closeTime,
-        duration,
-        profit,
-        timestamp: Date.now(),
-        isComplete: closeOrderId !== null // 标记是否为完整交易（有开仓和平仓）
-    };
+    console.log(`=== 记录交易历史 ===`);
+    console.log(`symbol: ${symbol}`);
+    console.log(`entryOrderId: ${entryOrderId}`);
+    console.log(`closeOrderId: ${closeOrderId}`);
+    console.log(`entryTime: ${entryTime}`);
+    console.log(`closeTime: ${closeTime}`);
+    console.log(`duration: ${duration}ms`);
+    console.log(`profit: ${profit}`);
+    console.log(`记录前历史总数: ${tradeHistory.length}`);
     
-    tradeHistory.push(tradeRecord);
+    if (closeOrderId === null) {
+        // 开仓记录 - 创建新的不完整记录
+        const tradeRecord = {
+            symbol,
+            entryOrderId,
+            closeOrderId: null,
+            entryTime,
+            closeTime: null,
+            duration: null,
+            profit: null,
+            timestamp: Date.now(),
+            isComplete: false
+        };
+        
+        tradeHistory.push(tradeRecord);
+        console.log(`✅ 记录开仓交易: ${entryOrderId}`);
+    } else {
+        // 平仓记录 - 查找并更新对应的开仓记录
+        let updated = false;
+        for (let i = tradeHistory.length - 1; i >= 0; i--) {
+            const trade = tradeHistory[i];
+            if (trade.symbol === symbol && 
+                trade.entryOrderId === entryOrderId && 
+                !trade.isComplete) {
+                // 更新为完整交易记录
+                trade.closeOrderId = closeOrderId;
+                trade.closeTime = closeTime;
+                trade.duration = duration;
+                trade.profit = profit;
+                trade.isComplete = true;
+                updated = true;
+                console.log(`✅ 更新平仓交易: ${entryOrderId} -> ${closeOrderId}`);
+                break;
+            }
+        }
+        
+        // 如果没有找到对应的开仓记录，创建新的完整记录
+        if (!updated) {
+            const tradeRecord = {
+                symbol,
+                entryOrderId,
+                closeOrderId,
+                entryTime,
+                closeTime,
+                duration,
+                profit,
+                timestamp: Date.now(),
+                isComplete: true
+            };
+            tradeHistory.push(tradeRecord);
+            console.log(`✅ 创建完整交易记录: ${entryOrderId} -> ${closeOrderId}`);
+        }
+    }
+    
+    console.log(`记录后历史总数: ${tradeHistory.length}`);
+    console.log(`=== 记录交易历史完成 ===`);
     
     // 只保留最近100笔交易记录，避免内存占用过多
     if (tradeHistory.length > 100) {
         tradeHistory = tradeHistory.slice(-100);
+        console.log(`历史记录超过100条，已清理，当前总数: ${tradeHistory.length}`);
     }
 }
 
@@ -95,20 +383,28 @@ function recordTradeHistory(symbol, entryOrderId, closeOrderId, entryTime, close
  * @returns {object|null} 上一笔完整交易记录
  */
 function getLastTradeHistory(symbol) {
+    console.log(`=== 查询交易历史开始 ===`);
+    console.log(`查询symbol: ${symbol}`);
+    console.log(`历史记录总数: ${tradeHistory.length}`);
+    
+    // 显示所有记录概览
+    const symbolRecords = tradeHistory.filter(t => t.symbol === symbol);
+    console.log(`${symbol} 相关记录: ${symbolRecords.length} 条`);
+    symbolRecords.forEach((t, index) => {
+        console.log(`  记录${index + 1}: entryOrderId=${t.entryOrderId}, isComplete=${t.isComplete}, duration=${t.duration}ms`);
+    });
+    
     // 从最新的记录开始查找，只返回完整的交易记录
     for (let i = tradeHistory.length - 1; i >= 0; i--) {
         const trade = tradeHistory[i];
         if (trade.symbol === symbol && trade.isComplete) {
-            console.log(`找到完整交易记录: entryOrderId=${trade.entryOrderId}, closeOrderId=${trade.closeOrderId}, duration=${trade.duration}ms`);
+            console.log(`✅ 找到完整交易记录: entryOrderId=${trade.entryOrderId}, closeOrderId=${trade.closeOrderId}, duration=${trade.duration}ms`);
+            console.log(`=== 查询交易历史结束 ===`);
             return trade;
         }
     }
-    console.log(`未找到完整交易记录，历史记录详情:`, tradeHistory.map(t => ({
-        symbol: t.symbol,
-        entryOrderId: t.entryOrderId,
-        isComplete: t.isComplete,
-        duration: t.duration
-    })));
+    console.log(`❌ 未找到完整交易记录`);
+    console.log(`=== 查询交易历史结束 ===`);
     return null;
 }
 
@@ -119,37 +415,24 @@ function getLastTradeHistory(symbol) {
      * @param {number} baseOrderAmount - 基础订单金额
      * @returns {number} 调整后的订单金额
      */
-function calculateOrderAmountMultiplier(symbol, baseOrderAmount) {
-    const lastTrade = getLastTradeHistory(symbol);
+function calculateOrderAmountMultiplier(symbol, baseOrderAmount, config) {
+    console.log(`=== 计算订单金额倍数开始 ===`);
+    console.log(`symbol: ${symbol}`);
+    console.log(`baseOrderAmount: ${baseOrderAmount}`);
+    console.log(`传入的config:`, {
+        durationMultiplier0to1: config.durationMultiplier0to1,
+        durationMultiplier1to3: config.durationMultiplier1to3,
+        durationMultiplier3to5: config.durationMultiplier3to5
+    });
     
-    console.log(`查询交易历史: symbol=${symbol}, 历史记录数量=${tradeHistory.length}, 找到记录=${!!lastTrade}`);
+    // 使用新的全局函数获取订单金额倍数
+    const multiplier = getOrderAmountMultiplier(config);
     
-    if (!lastTrade) {
-        // 没有历史记录，使用基础金额
-        console.log('没有历史记录，使用基础金额')
-        return baseOrderAmount;
-    }
+    const finalAmount = baseOrderAmount * multiplier;
+    console.log(`最终订单金额: ${baseOrderAmount} * ${multiplier} = ${finalAmount}`);
+    console.log(`=== 计算订单金额倍数结束 ===`);
     
-    const durationMinutes = lastTrade.duration / (1000 * 60); // 转换为分钟
-    console.log(`上一笔交易持续时间: ${durationMinutes.toFixed(2)} 分钟`);
-    
-    if (durationMinutes <= 2) {
-        console.log('2分钟以内，使用2倍金额')
-        // 2分钟以内，使用2倍金额
-        return baseOrderAmount * 2;
-    } else if (durationMinutes <= 4&&durationMinutes>2) {
-        console.log('2-4分钟，使用1.5倍金额')
-        // 2-4分钟，使用1.5倍金额
-        return baseOrderAmount * 1.5;
-    } else if (durationMinutes <= 6&&durationMinutes>4) {
-        console.log('4-6分钟，使用1.2倍金额')
-        // 4-6分钟，使用1.2倍金额
-        return baseOrderAmount * 1.2;
-    }
-     else {
-        // 超过4分钟，使用基础金额
-        return baseOrderAmount;
-    }
+    return finalAmount;
 }
 
 /**
@@ -193,6 +476,11 @@ class ScalpingBot {
             timeSlotStart: config.trading?.timeSlotStart || '09:00', // 特殊时间段开始时间
             timeSlotEnd: config.trading?.timeSlotEnd || '17:00', // 特殊时间段结束时间
             
+            // 持续时间倍数配置
+            durationMultiplier0to1: config.trading?.durationMultiplier0to1 || 3, // 0-1分钟倍数
+            durationMultiplier1to3: config.trading?.durationMultiplier1to3 || 2, // 1-3分钟倍数
+            durationMultiplier3to5: config.trading?.durationMultiplier3to5 || 1.5, // 3-5分钟倍数
+            
             // 日志配置
             logLevel: config.logLevel || 'INFO', // DEBUG, INFO, WARN, ERROR
             enableCsvLog: config.enableCsvLog !== false, // 启用CSV日志
@@ -233,6 +521,7 @@ class ScalpingBot {
         
         // 跟踪上次的持仓价值，用于判断是否需要更新平仓订单
         this.lastPositionValue = 0;
+        
         
         // 记录平仓订单创建失败的时间，防止频繁重试
         this.lastCloseOrderFailTime = 0;
@@ -561,7 +850,7 @@ class ScalpingBot {
         if (useBaseAmount) {
             tradeHistoryAdjustedAmount = this.config.orderAmount;
         } else {
-            tradeHistoryAdjustedAmount = calculateOrderAmountMultiplier(this.config.symbol, this.config.orderAmount);
+            tradeHistoryAdjustedAmount = calculateOrderAmountMultiplier(this.config.symbol, this.config.orderAmount, this.config);
         }
         
         // 综合调整：交易历史调整后的金额 * 时间段倍数
@@ -2273,16 +2562,12 @@ class ScalpingBot {
                 // 记录成交价格和方向
                 recordTradePrice(price, side);
                 
-                // 记录开仓交易历史（用于下一笔开仓时的金额调整）
-                recordTradeHistory(
-                    this.config.symbol,
-                    orderId,
-                    null, // 开仓时没有平仓订单ID
-                    entryTime,
-                    null, // 开仓时没有平仓时间
-                    null, // 开仓时没有持续时间
-                    null  // 开仓时没有盈利
-                );
+                // 记录开仓时间
+                recordPositionEntry(entryTime);
+                
+                // 记录开仓交易历史（已通过全局函数记录开仓时间）
+                const quantity = parseFloat(orderData.executedQuantity) || parseFloat(orderData.quantity);
+                console.log(`✅ 开仓交易记录: ${this.config.symbol} - ${orderId} - ${side} - ${quantity}@${price}`);
                 
                 this.log('INFO', '订单成交，更新持仓', {
                     orderId,
@@ -2349,6 +2634,25 @@ class ScalpingBot {
                         expectedIncrease,
                         reason: '持仓金额增加达到或超过ORDER_AMOUNT的90%'
                     });
+                    
+                    // 记录开仓交易历史（通过持仓变化检测到的成交，使用新的交易历史管理器）
+                    const entryTime = orderData.timestamp || Date.now();
+                    const price = parseFloat(orderData.price);
+                    const side = orderData.internalSide || (orderData.side === 'Bid' ? 'buy' : 'sell');
+                    const quantity = parseFloat(orderData.executedQuantity) || parseFloat(orderData.quantity);
+                    
+                    // 记录成交价格和方向
+                    recordTradePrice(price, side);
+                    
+                    // 记录开仓交易历史
+                    tradeHistoryManager.recordEntry(
+                        this.config.symbol,
+                        orderId,
+                        entryTime,
+                        price,
+                        side,
+                        quantity
+                    );
                 }
             }
             
@@ -2422,6 +2726,13 @@ class ScalpingBot {
                 status: closeOrderData.status 
             });
             
+            console.log(`=== 平仓订单完成处理开始 ===`);
+            console.log(`entryOrderId: ${entryOrderId}`);
+            console.log(`closeOrderId: ${closeOrderData.id}`);
+            console.log(`status: ${closeOrderData.status}`);
+            console.log(`isOrderFilled: ${this.isOrderFilled(closeOrderData)}`);
+            console.log(`=== 平仓订单完成处理开始 ===`);
+            
             // 只有成交的平仓订单才更新持仓
             if (this.isOrderFilled(closeOrderData)) {
                 // 使用实际成交数量
@@ -2450,50 +2761,32 @@ class ScalpingBot {
             if (entryOrder) {
                 const actualProfit = await this.calculateActualProfit(entryOrder, closeOrderData);
                 
+                console.log(`=== 平仓盈利计算 ===`);
+                console.log(`entryOrderId: ${entryOrderId}`);
+                console.log(`closeOrderId: ${closeOrderData.id}`);
+                console.log(`actualProfit: ${actualProfit}`);
+                console.log(`actualProfit > 0: ${actualProfit > 0}`);
+                console.log(`=== 平仓盈利计算完成 ===`);
+                
+                // 无论盈亏都记录交易历史（用于下一笔开仓时的金额调整）
+                const entryTime = entryOrder.timestamp || Date.now();
+                const closeTime = Date.now();
+                const duration = closeTime - entryTime;
+                
+                // 记录平仓交易历史（已通过全局函数记录平仓时间）
+                const closePrice = parseFloat(closeOrderData.price);
+                
+                console.log(`✅ 平仓交易记录: ${this.config.symbol} - ${entryOrderId} -> ${closeOrderData.id} - 盈利: ${actualProfit.toFixed(4)}`);
+                
+                // 清空成交价格记录（持仓平仓成功）
+                clearTradePrice();
+                
+                // 记录平仓时间（无论盈亏）
+                recordPositionClose(closeTime);
+                
                 if (actualProfit > 0) {
                     this.stats.successfulOrders++;
                     this.stats.totalProfit += actualProfit;
-                    
-                    // 更新交易历史记录（将开仓记录更新为完整交易记录）
-                    const entryTime = entryOrder.timestamp || Date.now();
-                    const closeTime = Date.now();
-                    const duration = closeTime - entryTime;
-                    
-                    // 查找并更新对应的开仓记录
-                    let updated = false;
-                    for (let i = tradeHistory.length - 1; i >= 0; i--) {
-                        const trade = tradeHistory[i];
-                        if (trade.symbol === this.config.symbol && 
-                            trade.entryOrderId === entryOrderId && 
-                            !trade.isComplete) {
-                            // 更新为完整交易记录
-                            trade.closeOrderId = closeOrderData.id;
-                            trade.closeTime = closeTime;
-                            trade.duration = duration;
-                            trade.profit = actualProfit;
-                            trade.isComplete = true;
-                            updated = true;
-                            console.log(`更新交易历史记录: entryOrderId=${entryOrderId}, closeOrderId=${closeOrderData.id}, duration=${duration}ms`);
-                            break;
-                        }
-                    }
-                    
-                    // 如果没有找到对应的开仓记录，创建新的完整记录
-                    if (!updated) {
-                        recordTradeHistory(
-                            this.config.symbol,
-                            entryOrderId,
-                            closeOrderData.id,
-                            entryTime,
-                            closeTime,
-                            duration,
-                            actualProfit
-                        );
-                        console.log(`创建新的完整交易记录: entryOrderId=${entryOrderId}, closeOrderId=${closeOrderData.id}`);
-                    }
-                    
-                    // 清空成交价格记录（持仓平仓成功）
-                    clearTradePrice();
                     
                     this.log('INFO', '平仓成功', { 
                         entryOrderId, 
@@ -2521,11 +2814,12 @@ class ScalpingBot {
                     });
                     await this.placeNewOrder();
                 } else {
-                    this.log('INFO', '平仓未盈利', { 
+                    this.log('INFO', '平仓亏损，但已记录交易历史', { 
                         entryOrderId, 
                         closeOrderId: closeOrderData.id,
                         actualProfit,
-                        newPosition: this.currentPosition
+                        newPosition: this.currentPosition,
+                        tradeHistoryRecorded: true
                     });
                     
                     // 记录未盈利交易
@@ -2754,11 +3048,23 @@ class ScalpingBot {
             // 根据是否为开仓调整订单金额
             let quantity;
             if (isNewPosition) {
-                // 从无到有的开仓，使用动态调整的金额
-                this.log('DEBUG', '检测到开仓机会，使用动态调整金额', {
+                // 从无到有的开仓，先通过API获取持仓历史
+                this.log('DEBUG', '检测到开仓机会，获取持仓历史', {
                     positionValue: currentPosition ? currentPosition.positionValue : 0,
                     isNewPosition: true
                 });
+                
+                // 通过API获取最近1次完整的持仓历史
+                const positionHistory = await fetchLastPositionFromAPI(this.config.symbol, this.client, this.config.tradeDirection);
+                if (positionHistory) {
+                    // 更新全局持仓时间记录
+                    recordPositionEntry(positionHistory.entryTime);
+                    recordPositionClose(positionHistory.closeTime);
+                    console.log(`✅ 已更新持仓历史记录`);
+                } else {
+                    console.log(`⚠️ 未找到持仓历史，将使用默认倍数`);
+                }
+                
                 quantity = await this.calculateOrderQuantityWithPrecision(price);
             } else {
                 // 已有持仓，使用基础金额
@@ -3145,6 +3451,7 @@ class ScalpingBot {
         console.log('└───────────────────────────────────────────────┘');
     }
     
+
     /**
      * 启动机器人
      */
@@ -3181,6 +3488,7 @@ class ScalpingBot {
             
             // 风险管理
             await this.riskManagement();
+            
                     
                     // 检查是否需要下新单（等待时间后）
                     await this.placeNewOrder();

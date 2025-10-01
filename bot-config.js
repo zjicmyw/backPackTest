@@ -48,7 +48,12 @@ module.exports = {
         // 时间段配置 (UTC+8)
         enableTimeSlot: process.env.ENABLE_TIME_SLOT !== 'false',
         timeSlotStart: process.env.TIME_SLOT_START || '09:00',
-        timeSlotEnd: process.env.TIME_SLOT_END || '17:00'
+        timeSlotEnd: process.env.TIME_SLOT_END || '17:00',
+        
+        // 持续时间倍数配置
+        durationMultiplier0to1: parseFloat(process.env.DURATION_MULTIPLIER_0_TO_1) || 3,
+        durationMultiplier1to3: parseFloat(process.env.DURATION_MULTIPLIER_1_TO_3) || 2,
+        durationMultiplier3to5: parseFloat(process.env.DURATION_MULTIPLIER_3_TO_5) || 1.5
     },
     
     // ================ 日志配置 ================
