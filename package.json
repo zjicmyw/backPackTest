@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node start-bot.js",
     "bot": "node start-bot.js",
-    "bot:help": "node start-bot.js --help"
+    "bot:help": "node start-bot.js --help",
+    "volume-bot": "node start-volume-bot.js",
+    "volume-bot:help": "node start-volume-bot.js --help"
   },
   "keywords": [
     "backpack",
@@ -20,7 +22,8 @@
   "dependencies": {
     "dotenv": "^17.2.2",
     "ed25519": "^0.0.5",
-    "node-fetch": "^2.6.7"
+    "node-fetch": "^2.6.7",
+    "ws": "^8.18.3"
   },
   "engines": {
     "node": ">=14.0.0"

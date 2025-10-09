@@ -1,9 +1,10 @@
-# Backpack 合约剥头皮交易机器人 V1.1
+# Backpack 合约交易机器人套件 V1.2
 
-一个基于 Backpack Exchange API 的自动化合约交易机器人，专为剥头皮交易策略设计。
+基于 Backpack Exchange API 的自动化合约交易机器人套件，包含两种专业交易模式。
 
-## 🎉 V1.1 版本特性
+## 🎉 V1.2 版本特性
 
+### 📈 剥头皮交易模式 (V1.1)
 - ✅ **智能交易系统**: 自动下单、智能平仓、连续交易
 - ✅ **风险控制机制**: 持仓限制、价格控制、订单管理
 - ✅ **智能订单管理**: 动态阈值、API驱动、错误处理
@@ -11,6 +12,13 @@
 - 🆕 **持续时间倍数系统**: 根据上次持仓持续时间动态调整订单金额
 - 🆕 **智能缓存机制**: 5分钟倍数缓存，提高响应速度
 - 🆕 **API历史查询**: 开仓前自动获取持仓历史，精准计算倍数
+
+### ⚡ 速刷合约交易模式 (V1.2 新增)
+- 🆕 **快速交易循环**: 限价开仓 + 市价关仓的高频交易模式
+- 🆕 **WebSocket实时监控**: 基于WS API的实时价格监控和订单管理
+- 🆕 **双重波动风控**: 1分钟/5分钟双重价格波动监控机制
+- 🆕 **交易次数限制**: 可配置的完整交易次数上限控制
+- 🆕 **专业日志系统**: 独立的CSV交易日志和调试日志
 
 ## 功能特性
 
@@ -27,6 +35,9 @@
 - 🎯 **持续时间倍数**: 根据历史持仓时长智能调整订单金额
 - ⚡ **智能缓存**: 倍数计算结果缓存5分钟，避免重复计算
 - 🔍 **历史查询**: API自动获取最近持仓历史，精准匹配交易周期
+- 🚀 **速刷交易**: 限价开仓+市价关仓的快速交易循环模式
+- 📡 **WebSocket监控**: 实时价格监控和订单状态跟踪
+- 🛡️ **波动风控**: 双重时间窗口的价格波动监控和自动暂停
 
 ## 文件结构
 
@@ -43,13 +54,16 @@ backpackTest/
 │   └── debug_YYYY-MM-DD.log      # 调试日志文件
 ├── backpack-client.js          # Backpack API 客户端类
 ├── scalping-bot.js             # 剥头皮交易机器人
-├── start-bot.js                # 机器人启动脚本
-├── test-bot.js                 # 机器人测试脚本
-├── bot-config.js               # 机器人配置文件
+├── volume-bot.js               # 速刷合约交易机器人 🆕
+├── start-bot.js                # 剥头皮机器人启动脚本
+├── start-volume-bot.js         # 速刷机器人启动脚本 🆕
+├── bot-config.js               # 剥头皮机器人配置文件
+├── volume-bot-config.js        # 速刷机器人配置文件 🆕
 ├── package.json                # Node.js 项目配置
 ├── README.md                   # 使用说明文档
 ├── env.example                 # 环境变量配置示例
-└── bot.env.example             # 机器人环境变量示例
+├── bot.env.example             # 剥头皮机器人环境变量示例
+└── volume-bot.env.example      # 速刷机器人环境变量示例 🆕
 ```
 
 ## 快速开始
@@ -120,7 +134,19 @@ export BACKPACK_PRIVATE_KEY=your_base64_encoded_private_key
 9. **防重复机制**: 防止平仓订单重复创建，确保订单管理的稳定性
 10. **智能订单更新**: 只在入场价格变化时才更新平仓订单，提高效率
 
-### 快速启动机器人
+## 🚀 两种交易模式
+
+### 📈 剥头皮交易模式
+专为持续盈利设计的智能剥头皮交易策略
+
+### ⚡ 速刷合约交易模式 🆕
+专为快速增加交易量设计的高频交易模式
+
+---
+
+## 快速启动指南
+
+### 📈 剥头皮交易模式
 
 #### 1. 配置环境变量
 
@@ -171,7 +197,65 @@ node start-bot.js --symbol ETH_USDC_PERP --order-amount 50 --profit-target 0.005
 SYMBOL=SOL_USDC_PERP ORDER_AMOUNT=200 node start-bot.js
 ```
 
-### 机器人配置参数
+---
+
+### ⚡ 速刷合约交易模式 🆕
+
+#### 1. 配置环境变量
+
+```bash
+# 复制速刷机器人环境变量示例文件
+copy volume-bot.env.example .env
+
+# 编辑 .env 文件，填入您的 API 密钥和配置
+BACKPACK_API_KEY=your_base64_encoded_public_key
+BACKPACK_PRIVATE_KEY=your_base64_encoded_private_key
+VOLUME_SYMBOL=BTC_USDC_PERP
+VOLUME_ORDER_AMOUNT=100
+VOLUME_LIMIT_SIDE=buy
+VOLUME_MAX_TRADES=1000
+
+# 🆕 波动风控配置
+VOLUME_VOLATILITY_1_THRESHOLD=0.02  # 1分钟2%波动阈值
+VOLUME_VOLATILITY_2_THRESHOLD=0.05  # 5分钟5%波动阈值
+```
+
+#### 2. 启动速刷机器人
+
+```bash
+# 使用默认配置启动
+npm run volume-bot
+
+# 或直接运行
+node start-volume-bot.js
+
+# 查看帮助信息
+npm run volume-bot:help
+```
+
+#### 3. 自定义配置启动
+
+```bash
+# 使用命令行参数自定义配置
+node start-volume-bot.js --symbol ETH_USDC_PERP --amount 50 --side sell --max-trades 500
+
+# 使用环境变量
+VOLUME_SYMBOL=SOL_USDC_PERP VOLUME_ORDER_AMOUNT=200 node start-volume-bot.js
+```
+
+### 速刷机器人配置参数
+
+| 参数 | 环境变量 | 默认值 | 说明 |
+|------|----------|--------|------|
+| 交易对 | `VOLUME_SYMBOL` | `BTC_USDC_PERP` | 合约交易对 |
+| 每单金额 | `VOLUME_ORDER_AMOUNT` | `100` | 每个订单金额 (USDC) |
+| 挂单方向 | `VOLUME_LIMIT_SIDE` | `buy` | 限价挂单方向 (`buy`/`sell`) |
+| 交易次数上限 | `VOLUME_MAX_TRADES` | `1000` | 完整交易次数上限 |
+| **波动风控配置** | | | **🆕 双重波动监控** |
+| 1分钟波动阈值 | `VOLUME_VOLATILITY_1_THRESHOLD` | `0.02` | 1分钟价格变化阈值 (2%) |
+| 5分钟波动阈值 | `VOLUME_VOLATILITY_2_THRESHOLD` | `0.05` | 5分钟价格变化阈值 (5%) |
+
+### 剥头皮机器人配置参数
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 |------|----------|--------|------|
