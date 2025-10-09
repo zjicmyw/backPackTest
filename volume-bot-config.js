@@ -88,6 +88,6 @@ module.exports = {
         enabled: process.env.VOLUME_TEST_MODE === 'true',
         
         // 测试模式下遇到错误立即停止
-        stopOnError: true
+        stopOnError: process.env.VOLUME_TEST_MODE === 'true'
     }
 };
