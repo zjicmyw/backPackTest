@@ -30,6 +30,27 @@ module.exports = {
         fees: {
             maker: parseFloat(process.env.MAKER_FEE) || 0.0001,  // 挂单手续费 0.01%
             taker: parseFloat(process.env.TAKER_FEE) || 0.00026, // 市价手续费 0.026%
+        },
+        
+        // 限价刷量模式配置
+        limitVolumeMode: {
+            // 是否启用限价刷量模式
+            enabled: process.env.VOLUME_LIMIT_MODE === 'true',
+            
+            // 价格检查间隔（毫秒）
+            priceCheckInterval: parseInt(process.env.VOLUME_PRICE_CHECK_INTERVAL) || 5000,
+            
+            // 订单超时时间（秒）
+            orderTimeout: parseInt(process.env.VOLUME_ORDER_TIMEOUT) || 30,
+            
+            // 最大价格调整次数
+            maxPriceAdjustments: parseInt(process.env.VOLUME_MAX_ADJUSTMENTS) || 100,
+            
+            // 订单数量配置
+            orderQuantity: parseFloat(process.env.VOLUME_ORDER_QUANTITY) || 0.001,
+            
+            // 最大持仓金额限制（USDC）
+            maxPositionValue: parseFloat(process.env.VOLUME_MAX_POSITION_VALUE) || 1000
         }
     },
     

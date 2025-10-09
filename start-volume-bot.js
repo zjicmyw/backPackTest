@@ -12,6 +12,7 @@
 
 require('dotenv').config();
 const VolumeBot = require('./volume-bot.js');
+const LimitVolumeBot = require('./limit-volume-bot.js');
 const volumeBotConfig = require('./volume-bot-config.js');
 
 /**
@@ -31,6 +32,7 @@ function showHelp() {
   --max-trades <COUNT>    最大交易次数 (默认: 1000)
   --volatility1 <PCT>     1分钟波动阈值 (默认: 0.02)
   --volatility2 <PCT>     5分钟波动阈值 (默认: 0.05)
+  --limit-mode <MODE>      限价刷量模式 true/false (默认: false)
   --test-mode             测试模式 (遇到错误立即停止，便于调试)
 
 环境变量:
@@ -42,6 +44,7 @@ function showHelp() {
   VOLUME_MAX_TRADES       最大交易次数
   VOLUME_VOLATILITY_1_THRESHOLD  1分钟波动阈值
   VOLUME_VOLATILITY_2_THRESHOLD  5分钟波动阈值
+  VOLUME_LIMIT_MODE       限价刷量模式 (true/false)
   VOLUME_TEST_MODE        测试模式 (true/false)
 
 示例:
@@ -54,8 +57,13 @@ function showHelp() {
   # 使用环境变量
   VOLUME_SYMBOL=SOL_USDC_PERP VOLUME_ORDER_AMOUNT=200 node start-volume-bot.js
 
+  # 限价刷量模式
+  VOLUME_LIMIT_MODE=true node start-volume-bot.js
+
 功能特性:
-  ✅ 限价开仓 + 市价关仓快速交易循环
+  ✅ 多种交易模式支持
+    - market_close: 限价开仓 + 市价关仓 (默认)
+    - limit_volume: 纯限价刷交易量模式
   ✅ WebSocket 实时价格监控
   ✅ 双重波动风控机制 (1分钟/5分钟)
   ✅ 完整交易次数限制
@@ -111,6 +119,10 @@ function parseArgs() {
                 config.volatility2Threshold = parseFloat(args[++i]);
                 break;
                 
+            case '--limit-mode':
+                config.limitMode = args[++i];
+                break;
+                
             case '--test-mode':
                 config.testMode = true;
                 break;
@@ -153,6 +165,11 @@ function validateConfig(config) {
     
     if (config.volumeTrading?.maxTrades <= 0) {
         errors.push('最大交易次数必须大于0');
+    }
+    
+    // 检查限价模式
+    if (config.limitMode && !['true', 'false'].includes(config.limitMode)) {
+        errors.push('限价模式必须是 true 或 false');
     }
     
     // 检查波动阈值
@@ -200,6 +217,10 @@ function mergeConfig(baseConfig, cmdArgs) {
         merged.volatilityControl.volatility2.priceChangeThreshold = cmdArgs.volatility2Threshold;
     }
     
+    if (cmdArgs.limitMode) {
+        merged.volumeTrading.limitVolumeMode.enabled = cmdArgs.limitMode === 'true';
+    }
+    
     if (cmdArgs.testMode) {
         merged.testMode = {
             enabled: true,
@@ -223,6 +244,7 @@ function showStartupInfo(config) {
    每单金额: ${config.volumeTrading.orderAmount} USDC
    挂单方向: ${config.volumeTrading.limitOrderSide}
    最大交易次数: ${config.volumeTrading.maxTrades}
+   限价刷量模式: ${config.volumeTrading.limitVolumeMode?.enabled ? '启用' : '禁用'}
 
 ⚡ 波动风控:
    1分钟阈值: ${(config.volatilityControl.volatility1.priceChangeThreshold * 100).toFixed(2)}% (暂停${config.volatilityControl.volatility1.pauseDuration}分钟)
@@ -267,8 +289,16 @@ async function main() {
         // 显示启动信息
         showStartupInfo(config);
         
-        // 创建并启动机器人
-        const bot = new VolumeBot(config);
+        // 根据模式选择机器人类型
+        let bot;
+        if (config.volumeTrading.limitVolumeMode?.enabled) {
+            console.log('🚀 启动限价刷交易量机器人...');
+            bot = new LimitVolumeBot(config);
+        } else {
+            console.log('🚀 启动速刷合约交易机器人...');
+            bot = new VolumeBot(config);
+        }
+        
         await bot.start();
         
     } catch (error) {
