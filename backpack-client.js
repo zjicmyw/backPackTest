@@ -444,6 +444,31 @@ class BackpackClient {
     }
 
     /**
+     * 获取成交历史记录（Fills）
+     * @param {object} params - 查询参数
+     * @param {string} params.symbol - 可选的交易对过滤
+     * @param {number} params.from - 可选的开始时间（毫秒时间戳）
+     * @param {number} params.to - 可选的结束时间（毫秒时间戳）
+     * @param {string} params.orderId - 可选的订单ID过滤
+     * @returns {Promise<Array>} 成交历史列表
+     */
+    async getFillHistory(params = {}) {
+        try {
+            const queryParams = {};
+            if (params.symbol) queryParams.symbol = params.symbol;
+            if (params.from) queryParams.from = params.from;
+            if (params.to) queryParams.to = params.to;
+            if (params.orderId) queryParams.orderId = params.orderId;
+
+            const result = await this.signedRequest('GET', '/wapi/v1/history/fills', 'fillHistoryQueryAll', queryParams);
+            return result || [];
+        } catch (error) {
+            console.error('获取成交历史失败:', error.message);
+            throw error;
+        }
+    }
+
+    /**
      * 获取市场信息
      * @returns {Promise<Array>} 市场信息列表
      */

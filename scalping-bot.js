@@ -505,6 +505,7 @@ class ScalpingBot {
         this.lastOrderTime = 0; // 上次下单时间
         this.orderCreateTimes = new Map(); // 订单创建时间
         this.currentMarketPrice = 0; // 当前市场价格
+        this.isProcessingOrder = false; // 防止重复下单的标志
         this.stats = {
             totalOrders: 0,
             successfulOrders: 0,
@@ -1849,6 +1850,53 @@ class ScalpingBot {
                     continue;
                 }
                 
+                // 检查是否是价格偏离过远的错误
+                const isPriceTooFarError = error.message.includes('Price is too far from the last active price');
+                
+                if (isPriceTooFarError) {
+                    this.log('WARN', '价格偏离过远，尝试获取最新市场价格重新下单', {
+                        error: error.message,
+                        side,
+                        currentPrice: price,
+                        quantity,
+                        retry: retryCount
+                    });
+                    
+                    // 获取最新的市场价格
+                    const marketData = await this.getMarketData();
+                    if (marketData) {
+                        const { bestBid, bestAsk } = marketData;
+                        const bestBidNum = parseFloat(bestBid);
+                        const bestAskNum = parseFloat(bestAsk);
+                        
+                        // 根据订单方向选择合适的价格
+                        let newPrice;
+                        if (side === 'buy') {
+                            // 买单使用买1价格
+                            newPrice = bestBidNum;
+                        } else {
+                            // 卖单使用卖1价格
+                            newPrice = bestAskNum;
+                        }
+                        
+                        this.log('INFO', '使用最新市场价格重新下单', {
+                            side,
+                            originalPrice: price,
+                            newPrice: newPrice,
+                            bestBid: bestBidNum,
+                            bestAsk: bestAskNum
+                        });
+                        
+                        // 使用新价格重新下单
+                        price = formatPriceWithGlobalPrecision(newPrice);
+                        retryCount--; // 不计入重试次数
+                        await this.sleep(500); // 短暂等待
+                        continue;
+                    } else {
+                        this.log('ERROR', '无法获取最新市场价格，跳过重试');
+                    }
+                }
+                
                 this.log('WARN', '下单失败，准备重试', { 
                     error: error.message, 
                     side, 
@@ -1856,7 +1904,8 @@ class ScalpingBot {
                     quantity,
                     retry: retryCount,
                     maxRetries,
-                    isPostOnlyTakerError
+                    isPostOnlyTakerError,
+                    isPriceTooFarError
                 });
                 
                 if (retryCount >= maxRetries) {
@@ -1886,23 +1935,54 @@ class ScalpingBot {
             const depthData = await this.client.getDepth(this.config.symbol);
             if (!depthData || !depthData.bids || !depthData.asks || 
                 depthData.bids.length === 0 || depthData.asks.length === 0) {
-                this.log('WARN', '市场深度数据无效');
+                this.log('WARN', '市场深度数据无效', {
+                    hasDepthData: !!depthData,
+                    hasBids: !!(depthData && depthData.bids),
+                    hasAsks: !!(depthData && depthData.asks),
+                    bidsLength: depthData?.bids?.length || 0,
+                    asksLength: depthData?.asks?.length || 0
+                });
                 return null;
             }
 
             const bestBid = depthData.bids[0][0]; // 最高买价
             const bestAsk = depthData.asks[0][0]; // 最低卖价
+            
+            const bestBidNum = parseFloat(bestBid);
+            const bestAskNum = parseFloat(bestAsk);
+
+            // 验证数据的有效性
+            if (isNaN(bestBidNum) || isNaN(bestAskNum) || bestBidNum <= 0 || bestAskNum <= 0) {
+                this.log('ERROR', '市场数据包含无效价格', {
+                    bestBid: bestBid,
+                    bestAsk: bestAsk,
+                    bestBidNum: bestBidNum,
+                    bestAskNum: bestAskNum
+                });
+                return null;
+            }
+            
+            // 验证价格合理性
+            if (bestAskNum <= bestBidNum) {
+                this.log('ERROR', '市场数据异常：卖价低于买价', {
+                    bestBid: bestBidNum,
+                    bestAsk: bestAskNum,
+                    spread: bestAskNum - bestBidNum
+                });
+                return null;
+            }
 
             this.log('DEBUG', '获取市场数据', {
                 symbol: this.config.symbol,
-                bestBid,
-                bestAsk,
-                spread: (parseFloat(bestAsk) - parseFloat(bestBid)).toFixed(2)
+                bestBid: bestBidNum,
+                bestAsk: bestAskNum,
+                spread: (bestAskNum - bestBidNum).toFixed(2),
+                spreadPercent: (((bestAskNum - bestBidNum) / bestBidNum) * 100).toFixed(4) + '%'
             });
 
             return {
-                bestBid,
-                bestAsk,
+                bestBid: bestBidNum.toString(),
+                bestAsk: bestAskNum.toString(),
                 bids: depthData.bids,
                 asks: depthData.asks
             };
@@ -1933,6 +2013,28 @@ class ScalpingBot {
             
             const { bestBid, bestAsk } = marketData;
             const currentPriceNum = parseFloat(currentPrice);
+            const bestBidNum = parseFloat(bestBid);
+            const bestAskNum = parseFloat(bestAsk);
+            
+            // 验证市场数据的有效性
+            if (isNaN(bestBidNum) || isNaN(bestAskNum) || bestBidNum <= 0 || bestAskNum <= 0) {
+                this.log('ERROR', '市场数据无效', {
+                    bestBid: bestBid,
+                    bestAsk: bestAsk,
+                    bestBidNum: bestBidNum,
+                    bestAskNum: bestAskNum
+                });
+                return null;
+            }
+            
+            // 验证价格合理性
+            if (bestAskNum <= bestBidNum) {
+                this.log('ERROR', '市场数据异常：卖价低于买价', {
+                    bestBid: bestBidNum,
+                    bestAsk: bestAskNum
+                });
+                return null;
+            }
             
             // 价格调整幅度（确保不会立即成交）
             const priceStep = Math.max(0.1, currentPriceNum * 0.0001); // 至少0.1或0.01%
@@ -1941,50 +2043,93 @@ class ScalpingBot {
             
             if (side === 'buy') {
                 // 买单：确保价格低于当前最佳卖价(bestAsk)
-                const maxBuyPrice = parseFloat(bestAsk) - priceStep;
+                const maxBuyPrice = bestAskNum - priceStep;
                 
-                if (currentPriceNum >= parseFloat(bestAsk)) {
+                if (currentPriceNum >= bestAskNum) {
                     // 当前价格太高，调整为安全价格
-                    adjustedPrice = Math.min(maxBuyPrice, parseFloat(bestBid));
+                    adjustedPrice = Math.min(maxBuyPrice, bestBidNum);
                     this.log('DEBUG', '买单价格调整', {
                         currentPrice: currentPriceNum,
-                        bestAsk: parseFloat(bestAsk),
-                        bestBid: parseFloat(bestBid),
+                        bestAsk: bestAskNum,
+                        bestBid: bestBidNum,
+                        maxBuyPrice: maxBuyPrice,
                         adjustedPrice,
                         priceStep
                     });
                 } else {
                     // 价格看起来合理，可能是市场快速变动，稍微降低价格
                     adjustedPrice = currentPriceNum - priceStep;
+                    this.log('DEBUG', '买单价格微调', {
+                        currentPrice: currentPriceNum,
+                        adjustedPrice,
+                        priceStep
+                    });
                 }
                 
             } else { // sell
                 // 卖单：确保价格高于当前最佳买价(bestBid)
-                const minSellPrice = parseFloat(bestBid) + priceStep;
+                const minSellPrice = bestBidNum + priceStep;
                 
-                if (currentPriceNum <= parseFloat(bestBid)) {
+                if (currentPriceNum <= bestBidNum) {
                     // 当前价格太低，调整为安全价格
-                    adjustedPrice = Math.max(minSellPrice, parseFloat(bestAsk));
+                    adjustedPrice = Math.max(minSellPrice, bestAskNum);
                     this.log('DEBUG', '卖单价格调整', {
                         currentPrice: currentPriceNum,
-                        bestBid: parseFloat(bestBid),
-                        bestAsk: parseFloat(bestAsk),
+                        bestBid: bestBidNum,
+                        bestAsk: bestAskNum,
+                        minSellPrice: minSellPrice,
                         adjustedPrice,
                         priceStep
                     });
                 } else {
                     // 价格看起来合理，可能是市场快速变动，稍微提高价格
                     adjustedPrice = currentPriceNum + priceStep;
+                    this.log('DEBUG', '卖单价格微调', {
+                        currentPrice: currentPriceNum,
+                        adjustedPrice,
+                        priceStep
+                    });
                 }
             }
             
             // 确保调整后的价格是合理的
-            if (adjustedPrice <= 0) {
-                this.log('WARN', '调整后价格无效');
+            if (adjustedPrice <= 0 || isNaN(adjustedPrice)) {
+                this.log('WARN', '调整后价格无效', {
+                    adjustedPrice,
+                    currentPrice: currentPriceNum,
+                    bestBid: bestBidNum,
+                    bestAsk: bestAskNum
+                });
                 return null;
             }
             
-            return formatPriceWithGlobalPrecision(adjustedPrice);
+            // 验证调整后的价格是否在合理范围内
+            if (side === 'buy' && adjustedPrice >= bestAskNum) {
+                this.log('WARN', '调整后买单价格仍然过高', {
+                    adjustedPrice,
+                    bestAsk: bestAskNum
+                });
+                adjustedPrice = bestBidNum - priceStep;
+            } else if (side === 'sell' && adjustedPrice <= bestBidNum) {
+                this.log('WARN', '调整后卖单价格仍然过低', {
+                    adjustedPrice,
+                    bestBid: bestBidNum
+                });
+                adjustedPrice = bestAskNum + priceStep;
+            }
+            
+            const formattedPrice = formatPriceWithGlobalPrecision(adjustedPrice);
+            
+            this.log('INFO', '价格调整完成', {
+                side,
+                originalPrice: currentPrice,
+                adjustedPrice: formattedPrice,
+                bestBid: bestBidNum,
+                bestAsk: bestAskNum,
+                priceStep
+            });
+            
+            return formattedPrice;
             
         } catch (error) {
             this.log('ERROR', '价格调整失败', { 
@@ -3033,6 +3178,14 @@ class ScalpingBot {
      * 下新单
      */
     async placeNewOrder() {
+        // 防止重复调用
+        if (this.isProcessingOrder) {
+            this.log('DEBUG', '正在处理订单中，跳过重复调用');
+            return;
+        }
+        
+        this.isProcessingOrder = true;
+        
         try {
             // 获取市场价格
             const { bid, ask } = await this.getCurrentPrice();
@@ -3079,7 +3232,7 @@ class ScalpingBot {
             const apiSide = side === 'buy' ? 'Bid' : 'Ask';
 
             // 检查价格差异控制 - 只有在有持仓时才检查与上一笔同方向交易的价差
-            if (!isNewPosition) {
+            if (currentPosition && currentPosition.positionValue > 0) {
                 const lastTradeInfo = getLastTradeInfo();
                 if (lastTradeInfo.price && lastTradeInfo.side === side) {
                     const lastPrice = lastTradeInfo.price;
@@ -3132,10 +3285,17 @@ class ScalpingBot {
                             formatPriceWithGlobalPrecision(newOrderPrice - lastPrice) : 
                             formatPriceWithGlobalPrecision(lastPrice - newOrderPrice)
                     });
+                } else {
+                    this.log('DEBUG', '没有同方向的历史交易价格，跳过价格差异检查', {
+                        hasLastTradePrice: !!lastTradeInfo.price,
+                        lastTradeSide: lastTradeInfo.side,
+                        currentSide: side,
+                        positionValue: currentPosition.positionValue
+                    });
                 }
             } else {
-                this.log('DEBUG', '开仓操作，跳过价格差异检查', {
-                    isNewPosition: true,
+                this.log('DEBUG', '无持仓状态，跳过价格差异检查', {
+                    hasPosition: !!(currentPosition && currentPosition.positionValue > 0),
                     positionValue: currentPosition ? currentPosition.positionValue : 0
                 });
             }
@@ -3170,8 +3330,7 @@ class ScalpingBot {
                 }
             }
             
-            // 检查订单间等待时间（只有在没有活跃订单时才检查）
-            let skipWaitTime = false;
+            // 检查订单间等待时间
             const now = Date.now();
             const timeSinceLastOrder = now - this.lastOrderTime;
             const waitTime = this.config.orderWaitTime * 1000; // 转换为毫秒
@@ -3215,30 +3374,28 @@ class ScalpingBot {
 
                 // 等待一小段时间确保取消操作完成
                 await this.sleep(5);
-                
-                // 取消订单后跳过等待时间检查，立即下新单
-                skipWaitTime = true;
-            } else {
-                // 没有活跃订单时，优先确保始终有一个活跃订单
-                // 只有在有持仓但没有活跃订单的情况下才检查等待时间
-                const actualPosition = await this.getActualPositionInfo();
-                const hasPosition = actualPosition && actualPosition.positionValue > 0;
-                
-                if (hasPosition && timeSinceLastOrder < waitTime) {
-                    const remainingTime = Math.ceil((waitTime - timeSinceLastOrder) / 1000);
-                    // this.log('DEBUG', '有持仓但等待时间未到，跳过下单', { 
-                    //     timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
-                    //     waitTime: this.config.orderWaitTime,
-                    //     remainingTime,
-                    //     hasPosition
-                    // });
-                    this.log('DEBUG', '有持仓但等待时间未到，跳过下单');
-                    return;
-                } else if (!hasPosition) {
-                    // 没有持仓时，应该立即下单，不受等待时间限制
-                    this.log('INFO', '没有持仓，立即下单');
-                    skipWaitTime = true;
-                }
+            }
+
+            // 检查订单间等待时间（只有在有持仓时才检查）
+            const actualPosition = await this.getActualPositionInfo();
+            const hasPosition = actualPosition && actualPosition.positionValue > 0;
+            
+            if (hasPosition && timeSinceLastOrder < waitTime) {
+                const remainingTime = Math.ceil((waitTime - timeSinceLastOrder) / 1000);
+                this.log('INFO', '有持仓且订单间等待时间未到，跳过下单', { 
+                    timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
+                    waitTime: this.config.orderWaitTime,
+                    remainingTime,
+                    activeOrders: this.activeOrders.size,
+                    positionValue: actualPosition.positionValue
+                });
+                return;
+            } else if (!hasPosition) {
+                this.log('INFO', '无持仓状态，忽略等待时间限制，立即下单', {
+                    timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
+                    waitTime: this.config.orderWaitTime,
+                    activeOrders: this.activeOrders.size
+                });
             }
 
             // this.log('INFO', '准备下新单', { 
@@ -3274,6 +3431,8 @@ class ScalpingBot {
 
         } catch (error) {
             this.log('ERROR', '下新单失败', { error: error.message });
+        } finally {
+            this.isProcessingOrder = false;
         }
     }
     
@@ -3470,25 +3629,20 @@ class ScalpingBot {
             // 0. 初始化全局价格精度
             await this.initializeGlobalPricePrecision();
             
-            // 1. 机器人开启后马上下1单
-            this.log('INFO', '机器人启动，立即下第一单');
-            await this.placeNewOrder();
-            
             // 主循环
             while (this.isRunning) {
                 try {
-            // 监控订单
-            await this.monitorOrders();
-            
-            // 检查订单是否需要更新价格（5秒内无持仓时）
-            await this.checkAndUpdateOrderPrices();
-            
-            // 检查持仓变化并更新平仓单
-            await this.checkPositionAndUpdateCloseOrders();
-            
-            // 风险管理
-            await this.riskManagement();
-            
+                    // 监控订单
+                    await this.monitorOrders();
+                    
+                    // 检查订单是否需要更新价格（5秒内无持仓时）
+                    await this.checkAndUpdateOrderPrices();
+                    
+                    // 检查持仓变化并更新平仓单
+                    await this.checkPositionAndUpdateCloseOrders();
+                    
+                    // 风险管理
+                    await this.riskManagement();
                     
                     // 检查是否需要下新单（等待时间后）
                     await this.placeNewOrder();
