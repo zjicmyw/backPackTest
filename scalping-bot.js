@@ -1945,8 +1945,8 @@ class ScalpingBot {
                 return null;
             }
 
-            const bestBid = depthData.bids[0][0]; // 最高买价
-            const bestAsk = depthData.asks[0][0]; // 最低卖价
+            const bestBid = depthData.bids[depthData.bids.length - 1][0]; // 最高买价（买1）
+            const bestAsk = depthData.asks[0][0]; // 最低卖价（卖1）
             
             const bestBidNum = parseFloat(bestBid);
             const bestAskNum = parseFloat(bestAsk);
@@ -2038,7 +2038,6 @@ class ScalpingBot {
             
             // 价格调整幅度（确保不会立即成交）
             const priceStep = Math.max(0.1, currentPriceNum * 0.0001); // 至少0.1或0.01%
-            
             let adjustedPrice;
             
             if (side === 'buy') {
@@ -2046,15 +2045,16 @@ class ScalpingBot {
                 const maxBuyPrice = bestAskNum - priceStep;
                 
                 if (currentPriceNum >= bestAskNum) {
-                    // 当前价格太高，调整为安全价格
-                    adjustedPrice = Math.min(maxBuyPrice, bestBidNum);
+                    // 当前价格太高，调整为买1价格减去步长，确保不会立即成交
+                    adjustedPrice = bestBidNum - priceStep;
                     this.log('DEBUG', '买单价格调整', {
                         currentPrice: currentPriceNum,
                         bestAsk: bestAskNum,
                         bestBid: bestBidNum,
                         maxBuyPrice: maxBuyPrice,
                         adjustedPrice,
-                        priceStep
+                        priceStep,
+                        note: '使用买1价格减去步长'
                     });
                 } else {
                     // 价格看起来合理，可能是市场快速变动，稍微降低价格
@@ -2069,17 +2069,18 @@ class ScalpingBot {
             } else { // sell
                 // 卖单：确保价格高于当前最佳买价(bestBid)
                 const minSellPrice = bestBidNum + priceStep;
-                
+
                 if (currentPriceNum <= bestBidNum) {
-                    // 当前价格太低，调整为安全价格
-                    adjustedPrice = Math.max(minSellPrice, bestAskNum);
+                    // 当前价格太低，调整为卖1价格加上步长，确保不会立即成交
+                    adjustedPrice = bestAskNum + priceStep;
                     this.log('DEBUG', '卖单价格调整', {
                         currentPrice: currentPriceNum,
                         bestBid: bestBidNum,
                         bestAsk: bestAskNum,
                         minSellPrice: minSellPrice,
                         adjustedPrice,
-                        priceStep
+                        priceStep,
+                        note: '使用卖1价格加上步长'
                     });
                 } else {
                     // 价格看起来合理，可能是市场快速变动，稍微提高价格
@@ -3382,13 +3383,17 @@ class ScalpingBot {
             
             if (hasPosition && timeSinceLastOrder < waitTime) {
                 const remainingTime = Math.ceil((waitTime - timeSinceLastOrder) / 1000);
-                this.log('INFO', '有持仓且订单间等待时间未到，跳过下单', { 
-                    timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
-                    waitTime: this.config.orderWaitTime,
-                    remainingTime,
-                    activeOrders: this.activeOrders.size,
-                    positionValue: actualPosition.positionValue
-                });
+                this.log(
+                    'INFO',
+                    `有持仓且订单间等待时间未到，跳过下单（距可下单还有${remainingTime}秒）`,
+                    { 
+                        timeSinceLastOrder: Math.ceil(timeSinceLastOrder / 1000),
+                        waitTime: this.config.orderWaitTime,
+                        remainingTime,
+                        activeOrders: this.activeOrders.size,
+                        positionValue: actualPosition.positionValue
+                    }
+                );
                 return;
             } else if (!hasPosition) {
                 this.log('INFO', '无持仓状态，忽略等待时间限制，立即下单', {
