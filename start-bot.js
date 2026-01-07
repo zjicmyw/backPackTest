@@ -24,7 +24,7 @@ const ScalpingBot = require('./scalping-bot');
 const config = require('./bot-config');
 
 // 解析命令行参数
-function parseArgs() {
+function parseArgs() { 
     const args = process.argv.slice(2);
     const options = {};
     
@@ -91,6 +91,9 @@ function showStartupInfo(config) {
     console.log(`交易方向: ${config.trading.tradeDirection}`);
     console.log(`价格偏移: ${(config.trading.priceOffset * 100).toFixed(3)}%`);
     console.log(`订单等待: ${config.trading.orderWaitTime} 秒`);
+    if (config.trading.minOrderPrice !== null || config.trading.maxOrderPrice !== null) {
+        console.log(`价格区间限制: ${config.trading.minOrderPrice !== null ? config.trading.minOrderPrice.toFixed(1) : '无下限'} - ${config.trading.maxOrderPrice !== null ? config.trading.maxOrderPrice.toFixed(1) : '无上限'}`);
+    }
     console.log(`日志级别: ${config.trading.logLevel || 'INFO'}`);
     console.log('================================\n');
 }

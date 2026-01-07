@@ -53,7 +53,12 @@ module.exports = {
         // 持续时间倍数配置
         durationMultiplier0to1: parseFloat(process.env.DURATION_MULTIPLIER_0_TO_1) || 3,
         durationMultiplier1to3: parseFloat(process.env.DURATION_MULTIPLIER_1_TO_3) || 2,
-        durationMultiplier3to5: parseFloat(process.env.DURATION_MULTIPLIER_3_TO_5) || 1.5
+        durationMultiplier3to5: parseFloat(process.env.DURATION_MULTIPLIER_3_TO_5) || 1.5,
+        
+        // 价格区间限制（可选）
+        // 当价格超出此区间时，停止增加仓位，但允许关闭或减少仓位
+        minOrderPrice: process.env.MIN_ORDER_PRICE ? parseFloat(process.env.MIN_ORDER_PRICE) : null,
+        maxOrderPrice: process.env.MAX_ORDER_PRICE ? parseFloat(process.env.MAX_ORDER_PRICE) : null
     },
     
     // ================ 日志配置 ================

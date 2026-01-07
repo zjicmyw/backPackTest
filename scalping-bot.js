@@ -481,6 +481,10 @@ class ScalpingBot {
             durationMultiplier1to3: config.trading?.durationMultiplier1to3 || 2, // 1-3分钟倍数
             durationMultiplier3to5: config.trading?.durationMultiplier3to5 || 1.5, // 3-5分钟倍数
             
+            // 价格区间限制（可选）
+            minOrderPrice: config.trading?.minOrderPrice || config.minOrderPrice || null, // 最小可挂单价格
+            maxOrderPrice: config.trading?.maxOrderPrice || config.maxOrderPrice || null, // 最大可挂单价格
+            
             // 日志配置
             logLevel: config.logLevel || 'INFO', // DEBUG, INFO, WARN, ERROR
             enableCsvLog: config.enableCsvLog !== false, // 启用CSV日志
@@ -1176,6 +1180,21 @@ class ScalpingBot {
                     // 计算新的限价价格
                     const internalSide = orderData.internalSide || (orderData.side === 'Bid' ? 'buy' : 'sell');
                     const newPrice = this.calculateOrderPrice(prices.bid, prices.ask, internalSide);
+                    
+                    // 检查价格是否在允许的挂单区间内
+                    if (!this.isPriceInAllowedRange(newPrice)) {
+                        this.log('INFO', '更新后的价格超出允许区间，取消订单且不重新下单', {
+                            orderId,
+                            newPrice: parseFloat(newPrice).toFixed(1),
+                            minOrderPrice: this.config.minOrderPrice ? this.config.minOrderPrice.toFixed(1) : '无限制',
+                            maxOrderPrice: this.config.maxOrderPrice ? this.config.maxOrderPrice.toFixed(1) : '无限制',
+                            note: '允许关闭或减少仓位，但禁止开新仓'
+                        });
+                        
+                        // 取消旧订单，但不重新下单
+                        await this.cancelOrder(orderId);
+                        continue;
+                    }
                     
                     // 取消旧订单
                     await this.cancelOrder(orderId);
@@ -3176,6 +3195,42 @@ class ScalpingBot {
     }
     
     /**
+     * 检查价格是否在允许的挂单区间内
+     * @param {number} price - 要检查的价格
+     * @returns {boolean} 是否在允许区间内
+     */
+    isPriceInAllowedRange(price) {
+        const priceNum = parseFloat(price);
+        
+        // 如果没有配置价格限制，则允许所有价格
+        if (this.config.minOrderPrice === null && this.config.maxOrderPrice === null) {
+            return true;
+        }
+        
+        // 检查最小价格限制
+        if (this.config.minOrderPrice !== null && priceNum < this.config.minOrderPrice) {
+            this.log('INFO', '价格低于最小可挂单价格，禁止开仓', {
+                price: priceNum.toFixed(1),
+                minOrderPrice: this.config.minOrderPrice.toFixed(1),
+                difference: (this.config.minOrderPrice - priceNum).toFixed(1)
+            });
+            return false;
+        }
+        
+        // 检查最大价格限制
+        if (this.config.maxOrderPrice !== null && priceNum > this.config.maxOrderPrice) {
+            this.log('INFO', '价格高于最大可挂单价格，禁止开仓', {
+                price: priceNum.toFixed(1),
+                maxOrderPrice: this.config.maxOrderPrice.toFixed(1),
+                difference: (priceNum - this.config.maxOrderPrice).toFixed(1)
+            });
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
      * 下新单
      */
     async placeNewOrder() {
@@ -3198,6 +3253,17 @@ class ScalpingBot {
             // 计算订单参数 - 直接使用买1或卖1价格
             const side = this.config.tradeDirection;
             const price = this.calculateOrderPrice(bid, ask, side);
+            
+            // 检查价格是否在允许的挂单区间内（只对开仓订单检查）
+            if (!this.isPriceInAllowedRange(price)) {
+                this.log('INFO', '价格超出允许区间，停止增加仓位', {
+                    price: parseFloat(price).toFixed(1),
+                    minOrderPrice: this.config.minOrderPrice ? this.config.minOrderPrice.toFixed(1) : '无限制',
+                    maxOrderPrice: this.config.maxOrderPrice ? this.config.maxOrderPrice.toFixed(1) : '无限制',
+                    note: '允许关闭或减少仓位，但禁止开新仓'
+                });
+                return;
+            }
             
             // 根据是否为开仓调整订单金额
             let quantity;
