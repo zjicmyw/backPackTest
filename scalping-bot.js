@@ -507,6 +507,7 @@ class ScalpingBot {
         this.currentPosition = 0; // 当前持仓数量（正数为多头，负数为空头）
         this.positionEntryPrice = 0; // 持仓入仓价格
         this.lastOrderTime = 0; // 上次下单时间
+        this.lastFilledOrderTime = 0; // 最后一个成交订单的时间
         this.orderCreateTimes = new Map(); // 订单创建时间
         this.currentMarketPrice = 0; // 当前市场价格
         this.isProcessingOrder = false; // 防止重复下单的标志
@@ -2727,6 +2728,9 @@ class ScalpingBot {
                 // 记录成交价格和方向
                 recordTradePrice(price, side);
                 
+                // 记录最后一个成交订单的时间
+                this.lastFilledOrderTime = entryTime;
+                
                 // 记录开仓时间
                 recordPositionEntry(entryTime);
                 
@@ -2808,6 +2812,9 @@ class ScalpingBot {
                     
                     // 记录成交价格和方向
                     recordTradePrice(price, side);
+                    
+                    // 记录最后一个成交订单的时间
+                    this.lastFilledOrderTime = entryTime;
                     
                     // 记录开仓交易历史
                     tradeHistoryManager.recordEntry(
@@ -2904,9 +2911,13 @@ class ScalpingBot {
                 const executedQty = parseFloat(closeOrderData.executedQuantity) || parseFloat(closeOrderData.quantity);
                 const closeSide = closeOrderData.side === 'Bid' ? 'buy' : 'sell';
                 const closePrice = parseFloat(closeOrderData.price);
+                const closeTime = closeOrderData.timestamp || Date.now();
                 
                 // 记录成交价格和方向
                 recordTradePrice(closePrice, closeSide);
+                
+                // 记录最后一个成交订单的时间
+                this.lastFilledOrderTime = closeTime;
                 
                 this.log('INFO', '平仓订单成交，更新持仓', {
                     closeOrderId: closeOrderData.id,
@@ -3196,10 +3207,16 @@ class ScalpingBot {
     
     /**
      * 检查价格是否在允许的挂单区间内
+     * 优先顺序：
+     * 1. 超出价格区间，拒绝
+     * 2. 最后一个成交订单时间超过等待时间，允许下单（即使价格超出区间）
+     * 3. 等待时间内，拒绝
+     * 
      * @param {number} price - 要检查的价格
+     * @param {boolean} checkWaitTime - 是否检查等待时间（如果超过等待时间则允许下单）
      * @returns {boolean} 是否在允许区间内
      */
-    isPriceInAllowedRange(price) {
+    isPriceInAllowedRange(price, checkWaitTime = true) {
         const priceNum = parseFloat(price);
         
         // 如果没有配置价格限制，则允许所有价格
@@ -3207,27 +3224,82 @@ class ScalpingBot {
             return true;
         }
         
+        let priceOutOfRange = false;
+        let priceLimitReason = '';
+        
         // 检查最小价格限制
         if (this.config.minOrderPrice !== null && priceNum < this.config.minOrderPrice) {
-            this.log('INFO', '价格低于最小可挂单价格，禁止开仓', {
-                price: priceNum.toFixed(1),
-                minOrderPrice: this.config.minOrderPrice.toFixed(1),
-                difference: (this.config.minOrderPrice - priceNum).toFixed(1)
-            });
-            return false;
+            priceOutOfRange = true;
+            priceLimitReason = `价格低于最小可挂单价格 (${priceNum.toFixed(1)} < ${this.config.minOrderPrice.toFixed(1)})`;
         }
         
         // 检查最大价格限制
         if (this.config.maxOrderPrice !== null && priceNum > this.config.maxOrderPrice) {
-            this.log('INFO', '价格高于最大可挂单价格，禁止开仓', {
+            priceOutOfRange = true;
+            priceLimitReason = `价格高于最大可挂单价格 (${priceNum.toFixed(1)} > ${this.config.maxOrderPrice.toFixed(1)})`;
+        }
+        
+        // 优先顺序1：如果价格在区间内，直接返回true（不检查等待时间）
+        if (!priceOutOfRange) {
+            return true;
+        }
+        
+        // 优先顺序2和3：价格超出区间，检查等待时间
+        if (!checkWaitTime) {
+            // 不检查等待时间，直接拒绝
+            this.log('INFO', priceLimitReason + '，禁止开仓', {
                 price: priceNum.toFixed(1),
-                maxOrderPrice: this.config.maxOrderPrice.toFixed(1),
-                difference: (priceNum - this.config.maxOrderPrice).toFixed(1)
+                minOrderPrice: this.config.minOrderPrice ? this.config.minOrderPrice.toFixed(1) : '无限制',
+                maxOrderPrice: this.config.maxOrderPrice ? this.config.maxOrderPrice.toFixed(1) : '无限制',
+                checkWaitTime: false
             });
             return false;
         }
         
-        return true;
+        // 检查是否有上一个成交订单记录
+        if (this.lastFilledOrderTime <= 0) {
+            // 没有上一个成交订单记录，拒绝下单
+            this.log('INFO', priceLimitReason + '，且没有上一个成交订单记录，禁止开仓', {
+                price: priceNum.toFixed(1),
+                minOrderPrice: this.config.minOrderPrice ? this.config.minOrderPrice.toFixed(1) : '无限制',
+                maxOrderPrice: this.config.maxOrderPrice ? this.config.maxOrderPrice.toFixed(1) : '无限制',
+                hasLastFilledOrderTime: false
+            });
+            return false;
+        }
+        
+        // 计算距离上一个成交订单的时间
+        const now = Date.now();
+        const timeSinceLastFilled = now - this.lastFilledOrderTime;
+        const waitTime = this.config.orderWaitTime * 1000; // 转换为毫秒
+        
+        // 优先顺序2：如果上一个成交订单已经超过ORDER_WAIT_TIME，允许下单（即使价格超出区间）
+        if (timeSinceLastFilled >= waitTime) {
+            this.log('INFO', '价格超出允许区间，但上一个成交订单已超过等待时间，允许下单', {
+                price: priceNum.toFixed(1),
+                minOrderPrice: this.config.minOrderPrice ? this.config.minOrderPrice.toFixed(1) : '无限制',
+                maxOrderPrice: this.config.maxOrderPrice ? this.config.maxOrderPrice.toFixed(1) : '无限制',
+                lastFilledOrderTime: new Date(this.lastFilledOrderTime).toLocaleString(),
+                timeSinceLastFilled: Math.ceil(timeSinceLastFilled / 1000) + '秒',
+                waitTime: this.config.orderWaitTime + '秒',
+                reason: priceLimitReason
+            });
+            return true; // 超过等待时间，允许下单
+        }
+        
+        // 优先顺序3：等待时间内，拒绝下单
+        const remainingTime = Math.ceil((waitTime - timeSinceLastFilled) / 1000);
+        this.log('INFO', '价格超出允许区间，且上一个成交订单未超过等待时间，禁止开仓', {
+            price: priceNum.toFixed(1),
+            minOrderPrice: this.config.minOrderPrice ? this.config.minOrderPrice.toFixed(1) : '无限制',
+            maxOrderPrice: this.config.maxOrderPrice ? this.config.maxOrderPrice.toFixed(1) : '无限制',
+            lastFilledOrderTime: new Date(this.lastFilledOrderTime).toLocaleString(),
+            timeSinceLastFilled: Math.ceil(timeSinceLastFilled / 1000) + '秒',
+            waitTime: this.config.orderWaitTime + '秒',
+            remainingTime: remainingTime + '秒',
+            reason: priceLimitReason
+        });
+        return false;
     }
 
     /**
@@ -3255,13 +3327,9 @@ class ScalpingBot {
             const price = this.calculateOrderPrice(bid, ask, side);
             
             // 检查价格是否在允许的挂单区间内（只对开仓订单检查）
-            if (!this.isPriceInAllowedRange(price)) {
-                this.log('INFO', '价格超出允许区间，停止增加仓位', {
-                    price: parseFloat(price).toFixed(1),
-                    minOrderPrice: this.config.minOrderPrice ? this.config.minOrderPrice.toFixed(1) : '无限制',
-                    maxOrderPrice: this.config.maxOrderPrice ? this.config.maxOrderPrice.toFixed(1) : '无限制',
-                    note: '允许关闭或减少仓位，但禁止开新仓'
-                });
+            // 如果价格超出区间，但上一个成交订单已超过ORDER_WAIT_TIME，则允许下单
+            if (!this.isPriceInAllowedRange(price, true)) {
+                // isPriceInAllowedRange 内部已经记录了详细的日志，这里直接返回
                 return;
             }
             
