@@ -3301,7 +3301,7 @@ class ScalpingBot {
         });
         return false;
     }
-
+    
     /**
      * 下新单
      */

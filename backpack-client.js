@@ -22,13 +22,53 @@ class BackpackClient {
             // 将私钥从 base64 转换为 Buffer
             const privateKeyBuffer = Buffer.from(this.privateKey, 'base64');
             
+            // 检查私钥长度
+            // ED25519 私钥应该是 32 字节，或者密钥对是 64 字节（32字节私钥+32字节公钥）
+            if (privateKeyBuffer.length !== 32 && privateKeyBuffer.length !== 64) {
+                console.warn(`⚠️  私钥长度异常: ${privateKeyBuffer.length} 字节 (期望: 32 或 64 字节)`);
+            }
+            
             // 使用 ed25519 库进行签名
+            // 如果私钥是 32 字节，需要从私钥生成密钥对
+            let keyPair;
+            if (privateKeyBuffer.length === 32) {
+                // 从 32 字节私钥生成密钥对
+                keyPair = ed25519.MakeKeypair(privateKeyBuffer);
+            } else if (privateKeyBuffer.length === 64) {
+                // 64 字节已经是密钥对格式（32字节私钥+32字节公钥）
+                keyPair = {
+                    privateKey: privateKeyBuffer.slice(0, 32),
+                    publicKey: privateKeyBuffer.slice(32, 64)
+                };
+            } else {
+                throw new Error(`不支持的私钥长度: ${privateKeyBuffer.length} 字节`);
+            }
+
+            // 校验公钥是否与 API Key 匹配（用于排查 Invalid signature）
+            const derivedPub = keyPair.publicKey.toString('base64');
+            if (this.apiKey && this.apiKey !== derivedPub) {
+                console.warn('⚠️  API Key 与私钥推导出的公钥不匹配', {
+                    apiKeyFirst20: this.apiKey.substring(0, 20),
+                    derivedPubFirst20: derivedPub.substring(0, 20)
+                });
+            }
+            
             const messageBuffer = Buffer.from(message, 'utf8');
-            const signature = ed25519.Sign(messageBuffer, privateKeyBuffer);
+            const signature = ed25519.Sign(messageBuffer, keyPair);
             
             return signature.toString('base64');
         } catch (error) {
             console.error('签名生成失败:', error);
+            console.error('签名消息:', message);
+            console.error('私钥 Base64 长度:', this.privateKey ? this.privateKey.length : 0);
+            if (this.privateKey) {
+                try {
+                    const keyBuffer = Buffer.from(this.privateKey, 'base64');
+                    console.error('私钥 Buffer 长度:', keyBuffer.length);
+                } catch (e) {
+                    console.error('无法解析私钥为 Base64');
+                }
+            }
             throw error;
         }
     }
@@ -148,7 +188,16 @@ class BackpackClient {
                 return { message: responseText, status: 'success' };
             }
         } catch (error) {
-            console.error(`请求失败 ${method} ${endpoint}:`, error);
+            // 如果是签名错误，输出更多调试信息
+            if (error.message && error.message.includes('Invalid signature')) {
+                console.error(`请求失败 ${method} ${endpoint}:`, error);
+                console.error('签名消息:', message);
+                console.error('API Key:', this.apiKey ? `${this.apiKey.substring(0, 20)}...` : '未设置');
+                const keyInfo = this.getKeyInfo();
+                console.error('密钥信息:', keyInfo);
+            } else {
+                console.error(`请求失败 ${method} ${endpoint}:`, error);
+            }
             throw error;
         }
     }
@@ -342,7 +391,8 @@ class BackpackClient {
         const method = 'GET';
         const instruction = 'balanceQuery';
         
-        const response = await this.signedRequest(method, endpoint, instruction);
+        // balanceQuery 不需要参数，传递空对象
+        const response = await this.signedRequest(method, endpoint, instruction, {});
         
         // 转换响应格式为数组
         if (response && typeof response === 'object') {
@@ -517,6 +567,182 @@ class BackpackClient {
             console.error(`获取市场 ${symbol} 信息失败:`, error.message);
             throw error;
         }
+    }
+
+    // ================ 转账相关方法 ================
+
+    /**
+     * 请求提现/转账
+     * @param {object} params - 转账参数
+     * @param {string} params.address - 目标地址
+     * @param {string} params.blockchain - 区块链类型（如 'Solana', 'Ethereum'）
+     * @param {string} params.quantity - 转账数量
+     * @param {string} params.symbol - 资产符号（如 'USDC'）
+     * @param {string} params.twoFactorToken - 2FA令牌（可选）
+     * @param {boolean} params.autoBorrow - 自动借贷（可选）
+     * @param {boolean} params.autoLendRedeem - 自动赎回借贷（可选）
+     * @returns {Promise<object>} 转账结果
+     */
+    async requestWithdrawal(params) {
+        try {
+            const withdrawalPayload = {
+                address: params.address,
+                blockchain: params.blockchain,
+                quantity: params.quantity,
+                symbol: params.symbol
+            };
+
+            // 可选参数
+            if (params.twoFactorToken) {
+                withdrawalPayload.twoFactorToken = params.twoFactorToken;
+            }
+            if (params.autoBorrow !== undefined) {
+                withdrawalPayload.autoBorrow = params.autoBorrow;
+            }
+            if (params.autoLendRedeem !== undefined) {
+                withdrawalPayload.autoLendRedeem = params.autoLendRedeem;
+            }
+
+            const result = await this.signedRequest(
+                'POST',
+                '/wapi/v1/capital/withdrawals',
+                'withdraw',
+                {},
+                withdrawalPayload
+            );
+            return result;
+        } catch (error) {
+            console.error('请求转账失败:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * 获取提现历史
+     * @param {object} params - 查询参数
+     * @param {string} params.symbol - 可选的资产符号过滤
+     * @param {number} params.from - 可选的开始时间（毫秒时间戳）
+     * @param {number} params.to - 可选的结束时间（毫秒时间戳）
+     * @returns {Promise<Array>} 提现历史列表
+     */
+    async getWithdrawals(params = {}) {
+        try {
+            const queryParams = {};
+            if (params.symbol) queryParams.symbol = params.symbol;
+            if (params.from) queryParams.from = params.from;
+            if (params.to) queryParams.to = params.to;
+
+            const result = await this.signedRequest(
+                'GET',
+                '/wapi/v1/capital/withdrawals',
+                'withdrawalQueryAll',
+                queryParams
+            );
+            return result || [];
+        } catch (error) {
+            console.error('获取提现历史失败:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * 获取存款地址
+     * @param {string} blockchain - 区块链类型（如 'Solana', 'Ethereum'）
+     * @returns {Promise<object>} 存款地址信息
+     */
+    async getDepositAddress(blockchain) {
+        try {
+            const result = await this.signedRequest(
+                'GET',
+                '/wapi/v1/capital/deposit/address',
+                'depositAddressQuery',
+                { blockchain }
+            );
+            return result;
+        } catch (error) {
+            console.error(`获取存款地址失败 (${blockchain}):`, error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * 子账户转账便捷方法
+     * 注意：此方法尝试使用目标账户的存款地址进行转账
+     * 如果转账成功且 isInternal 为 true，则确认为内部转账
+     * 
+     * @param {object} params - 转账参数
+     * @param {BackpackClient} params.targetClient - 目标账户的客户端实例
+     * @param {string} params.quantity - 转账数量
+     * @param {string} params.symbol - 资产符号（如 'USDC'）
+     * @param {string} params.blockchain - 区块链类型（如 'Solana', 'Ethereum'），默认 'Solana'
+     * @param {string} params.twoFactorToken - 2FA令牌（可选）
+     * @returns {Promise<object>} 转账结果，包含 isInternal 字段
+     */
+    async transferToSubaccount(params) {
+        try {
+            const blockchain = params.blockchain || 'Solana';
+            
+            // 获取目标账户的存款地址
+            const targetAddressInfo = await params.targetClient.getDepositAddress(blockchain);
+            if (!targetAddressInfo || !targetAddressInfo.address) {
+                throw new Error('无法获取目标账户存款地址');
+            }
+
+            const targetAddress = targetAddressInfo.address;
+
+            // 执行转账
+            const result = await this.requestWithdrawal({
+                address: targetAddress,
+                blockchain: blockchain,
+                quantity: params.quantity,
+                symbol: params.symbol,
+                twoFactorToken: params.twoFactorToken
+            });
+
+            // 检查是否为内部转账
+            if (result.isInternal === true) {
+                console.log('✅ 转账确认为内部转账（子账户转账）');
+            } else if (result.isInternal === false) {
+                console.warn('⚠️  转账被识别为外部转账，可能不是子账户转账');
+            } else {
+                console.warn('⚠️  无法确定转账类型，请检查转账结果');
+            }
+
+            return result;
+        } catch (error) {
+            console.error('子账户转账失败:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * 获取当前密钥信息（用于调试签名问题）
+     */
+    getKeyInfo() {
+        const info = {};
+        if (this.apiKey) {
+            info.apiKeyBase64Length = this.apiKey.length;
+            try {
+                const buf = Buffer.from(this.apiKey, 'base64');
+                info.apiKeyBufferLength = buf.length;
+            } catch (e) {
+                info.apiKeyBufferLength = '解析失败';
+            }
+        } else {
+            info.apiKeyBase64Length = 0;
+        }
+        if (this.privateKey) {
+            info.privateKeyBase64Length = this.privateKey.length;
+            try {
+                const buf = Buffer.from(this.privateKey, 'base64');
+                info.privateKeyBufferLength = buf.length;
+            } catch (e) {
+                info.privateKeyBufferLength = '解析失败';
+            }
+        } else {
+            info.privateKeyBase64Length = 0;
+        }
+        return info;
     }
 }
 
