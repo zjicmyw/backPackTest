@@ -8,7 +8,13 @@
     "bot": "node start-bot.js",
     "bot:help": "node start-bot.js --help",
     "volume-bot": "node start-volume-bot.js",
-    "volume-bot:help": "node start-volume-bot.js --help"
+    "volume-bot:help": "node start-volume-bot.js --help",
+    "rebalancer": "node start-rebalancer.js",
+    "rebalancer:start": "pm2 start ecosystem.config.js --only balance-rebalancer",
+    "rebalancer:stop": "pm2 stop balance-rebalancer",
+    "rebalancer:restart": "pm2 restart balance-rebalancer",
+    "rebalancer:logs": "pm2 logs balance-rebalancer",
+    "rebalancer:status": "pm2 status balance-rebalancer"
   },
   "keywords": [
     "backpack",
