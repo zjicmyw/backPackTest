@@ -16,20 +16,116 @@
  *   ACCOUNT_2_API_KEY
  *   ACCOUNT_2_PRIVATE_KEY
  *   ACCOUNT_2_NAME   (可选)
+ *   CHAT_ID          (Telegram chat id)
+ *   API_KEY          (本地 3000 端口 Telegram API Key)
  *
  * 可选：
  *   BLOCKCHAIN  默认 'Solana'
  *   MIN_TRANSFER_USDC  默认 0.01
  */
 
-require('dotenv').config();
+// quiet: true 关闭 dotenv 17 的提示信息（如 "injecting env from .env"）
+require('dotenv').config({ quiet: true });
 const BackpackClient = require('./backpack-client');
+const fetch = require('node-fetch');
 
 const INTERVAL_MS = 30_000;
-const LOW_THRESHOLD = 0.43;
-const TARGET_RATIO = 0.46;
+const LOW_THRESHOLD = 0.45;
+const TARGET_RATIO = 0.50;
 const DEFAULT_BLOCKCHAIN = process.env.BLOCKCHAIN || 'Solana';
 const MIN_TRANSFER = parseFloat(process.env.MIN_TRANSFER_USDC || '0.01');
+const TELEGRAM_ENDPOINT = 'http://localhost:3000/send-message';
+const ERROR_COOLDOWN_MS = 30 * 60 * 1000;
+const BJ_OFFSET_MS = 8 * 60 * 60 * 1000;
+const STATS_INTERVAL_MS = 2 * 60 * 60 * 1000;
+
+const errorLastSentAt = new Map();
+let warnedMissingTelegramConfig = false;
+
+function formatBeijingTimestamp(nowMs = Date.now()) {
+    const bj = new Date(nowMs + BJ_OFFSET_MS);
+    const y = bj.getUTCFullYear();
+    const m = String(bj.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(bj.getUTCDate()).padStart(2, '0');
+    const hh = String(bj.getUTCHours()).padStart(2, '0');
+    const mm = String(bj.getUTCMinutes()).padStart(2, '0');
+    return `${y}-${m}-${d} ${hh}:${mm}`;
+}
+
+function getNextStatsAtMs(nowMs = Date.now()) {
+    const bj = new Date(nowMs + BJ_OFFSET_MS);
+    const year = bj.getUTCFullYear();
+    const month = bj.getUTCMonth();
+    const day = bj.getUTCDate();
+    const hour = bj.getUTCHours();
+    const minute = bj.getUTCMinutes();
+    const second = bj.getUTCSeconds();
+    let nextHour = hour;
+    if (minute > 0 || second > 0) {
+        nextHour += 1;
+    }
+    if (nextHour % 2 !== 0) {
+        nextHour += 1;
+    }
+    const nextBjUtcMs = Date.UTC(year, month, day, nextHour, 0, 0);
+    return nextBjUtcMs - BJ_OFFSET_MS;
+}
+
+function buildPrefix(text) {
+    return `[${text}]`;
+}
+
+function shouldSendError(key, nowMs = Date.now()) {
+    const last = errorLastSentAt.get(key);
+    if (last && nowMs - last < ERROR_COOLDOWN_MS) {
+        return false;
+    }
+    errorLastSentAt.set(key, nowMs);
+    // 简单清理，避免 map 无限制增长
+    for (const [k, t] of errorLastSentAt.entries()) {
+        if (nowMs - t > ERROR_COOLDOWN_MS * 2) {
+            errorLastSentAt.delete(k);
+        }
+    }
+    return true;
+}
+
+async function sendTelegramMessage(prefix, message) {
+    const chatId = process.env.CHAT_ID;
+    const apiKey = process.env.API_KEY;
+    if (!chatId || !apiKey) {
+        if (!warnedMissingTelegramConfig) {
+            console.warn('⚠️ 缺少 CHAT_ID 或 API_KEY，已跳过 Telegram 消息发送');
+            warnedMissingTelegramConfig = true;
+        }
+        return;
+    }
+    const fullMessage = `${prefix} ${message}`;
+    try {
+        const res = await fetch(TELEGRAM_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-API-Key': apiKey
+            },
+            body: JSON.stringify({ chatId, message: fullMessage })
+        });
+        if (!res.ok) {
+            throw new Error(`Telegram 响应错误: ${res.status} ${res.statusText}`);
+        }
+    } catch (err) {
+        console.error('❌ 发送 Telegram 消息失败', err.message || err);
+    }
+}
+
+async function sendErrorOnce(prefix, context, err) {
+    const msg = err && err.message ? err.message : String(err);
+    const key = `${prefix}|${context}|${msg}`;
+    if (!shouldSendError(key)) {
+        return;
+    }
+    await sendTelegramMessage(prefix, `❌ ${context}: ${msg}`);
+}
 
 function loadTwoAccounts() {
     const accounts = [];
@@ -91,12 +187,26 @@ async function transfer(source, target, amount, blockchain) {
 
 async function rebalanceLoop() {
     const [a, b] = loadTwoAccounts();
+    let nextStatsAtMs = getNextStatsAtMs();
     while (true) {
         try {
             const [balA, balB] = await Promise.all([
                 fetchUsdcBalance(a),
                 fetchUsdcBalance(b)
             ]);
+            const nowMs = Date.now();
+            if (nowMs >= nextStatsAtMs) {
+                const timeStr = formatBeijingTimestamp(nowMs);
+                await sendTelegramMessage(
+                    buildPrefix(`${a.name} | ${b.name}`),
+                    `📊 余额统计 (${timeStr} 北京时间)\n` +
+                    `${a.name} 可用: ${balA.available.toFixed(6)} | 锁定: ${balA.locked.toFixed(6)} | 总计: ${balA.total.toFixed(6)}\n` +
+                    `${b.name} 可用: ${balB.available.toFixed(6)} | 锁定: ${balB.locked.toFixed(6)} | 总计: ${balB.total.toFixed(6)}`
+                );
+                do {
+                    nextStatsAtMs += STATS_INTERVAL_MS;
+                } while (nextStatsAtMs <= nowMs);
+            }
 
             const total = balA.available + balB.available;
             if (total <= 0) {
@@ -142,11 +252,20 @@ async function rebalanceLoop() {
             try {
                 const res = await transfer(high.account, low.account, need, DEFAULT_BLOCKCHAIN);
                 console.log('✅ 转账完成', { isInternal: res.isInternal, status: res.status });
+                const prefix = buildPrefix(`${high.account.name} -> ${low.account.name}`);
+                await sendTelegramMessage(
+                    prefix,
+                    `✅ 转账完成 ${need.toFixed(6)} USDC (${DEFAULT_BLOCKCHAIN})\n状态: ${res.status || 'unknown'}\n内部转账: ${res.isInternal === undefined ? 'unknown' : res.isInternal}`
+                );
             } catch (err) {
                 console.error('❌ 转账失败', err.message || err);
+                const prefix = buildPrefix(`${high.account.name} -> ${low.account.name}`);
+                await sendErrorOnce(prefix, '转账失败', err);
             }
         } catch (err) {
             console.error('❌ 本轮执行出错:', err.message || err);
+            const prefix = buildPrefix(`${a.name}, ${b.name}`);
+            await sendErrorOnce(prefix, '本轮执行出错', err);
         }
 
         await sleep(INTERVAL_MS);

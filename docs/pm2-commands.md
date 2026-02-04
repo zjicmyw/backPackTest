@@ -208,6 +208,28 @@ pm2 monit
 # 如果超过限制，PM2 会自动重启（配置中 max_memory_restart: '500M'）
 ```
 
+## ❓ 常见日志说明
+
+### dotenv 提示信息
+
+若日志中出现类似：
+
+```
+[dotenv@17.2.3] injecting env (41) from .env
+tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+tip: ⚙️  write to custom object with { processEnv: myObject }
+tip: ⚙️  enable debug logging with { debug: true }
+```
+
+**含义：**
+
+- **injecting env (41) from .env**：dotenv 从 `.env` 文件加载了 41 个环境变量到 `process.env`，属于正常行为。
+- **tip: ...**：dotenv 17 自带的说明/推广文案，不影响功能。
+
+**如何关闭：** 在代码里使用 `require('dotenv').config({ quiet: true })`，已在本项目的 `balance-rebalancer.js` 中启用，重启后这些提示会消失。
+
+**若出现多次：** 可能是 PM2 重启或多次加载 dotenv，只要进程正常运行即可忽略。
+
 ## 📚 更多信息
 
 - [PM2 官方文档](https://pm2.keymetrics.io/docs/usage/quick-start/)
