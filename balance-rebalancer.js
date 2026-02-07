@@ -3,7 +3,7 @@
 /**
  * 两账户 USDC 自动平衡脚本
  * 每 30s 检测一次两账户 USDC 余额：
- * - 若任一账户 < 总额的 43%，从高余额账户转至低余额账户，使其达到 46%
+ * - 若任一账户 < 总额的 45%，从高余额账户转至低余额账户，使其达到 50%
  * - 转账时自动赎回借贷资金（autoLendRedeem: true）
  *
  * 使用：
@@ -58,16 +58,15 @@ function getNextStatsAtMs(nowMs = Date.now()) {
     const month = bj.getUTCMonth();
     const day = bj.getUTCDate();
     const hour = bj.getUTCHours();
-    const minute = bj.getUTCMinutes();
-    const second = bj.getUTCSeconds();
     let nextHour = hour;
-    if (minute > 0 || second > 0) {
-        nextHour += 1;
-    }
     if (nextHour % 2 !== 0) {
         nextHour += 1;
     }
-    const nextBjUtcMs = Date.UTC(year, month, day, nextHour, 0, 0);
+    let nextBjUtcMs = Date.UTC(year, month, day, nextHour, 1, 0);
+    const candidateMs = nextBjUtcMs - BJ_OFFSET_MS;
+    if (nowMs > candidateMs) {
+        nextBjUtcMs += 2 * 60 * 60 * 1000;
+    }
     return nextBjUtcMs - BJ_OFFSET_MS;
 }
 
@@ -80,6 +79,10 @@ function shouldSendError(key, nowMs = Date.now()) {
     if (last && nowMs - last < ERROR_COOLDOWN_MS) {
         return false;
     }
+    return true;
+}
+
+function markErrorSent(key, nowMs = Date.now()) {
     errorLastSentAt.set(key, nowMs);
     // 简单清理，避免 map 无限制增长
     for (const [k, t] of errorLastSentAt.entries()) {
@@ -87,7 +90,6 @@ function shouldSendError(key, nowMs = Date.now()) {
             errorLastSentAt.delete(k);
         }
     }
-    return true;
 }
 
 async function sendTelegramMessage(prefix, message) {
@@ -98,24 +100,58 @@ async function sendTelegramMessage(prefix, message) {
             console.warn('⚠️ 缺少 CHAT_ID 或 API_KEY，已跳过 Telegram 消息发送');
             warnedMissingTelegramConfig = true;
         }
-        return;
+        return false;
     }
     const fullMessage = `${prefix} ${message}`;
-    try {
-        const res = await fetch(TELEGRAM_ENDPOINT, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-API-Key': apiKey
-            },
-            body: JSON.stringify({ chatId, message: fullMessage })
-        });
-        if (!res.ok) {
-            throw new Error(`Telegram 响应错误: ${res.status} ${res.statusText}`);
+    const maxRetries = 3;
+    const baseDelayMs = 500;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+        const canAbort = typeof AbortController !== 'undefined';
+        const controller = canAbort ? new AbortController() : null;
+        const timeout = controller ? setTimeout(() => controller.abort(), 5000) : null;
+        try {
+            const options = {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': apiKey
+                },
+                body: JSON.stringify({ chatId, message: fullMessage })
+            };
+            if (controller) {
+                options.signal = controller.signal;
+            }
+            const res = await fetch(TELEGRAM_ENDPOINT, {
+                ...options
+            });
+            if (!res.ok) {
+                const err = new Error(`Telegram 响应错误: ${res.status} ${res.statusText}`);
+                if (res.status < 500 && res.status !== 429) {
+                    err.nonRetryable = true;
+                }
+                throw err;
+            }
+            return true;
+        } catch (err) {
+            lastErr = err;
+            if (err && err.nonRetryable) {
+                console.error('❌ 发送 Telegram 消息失败（不重试）', err.message || err);
+                return false;
+            }
+            if (attempt >= maxRetries) {
+                break;
+            }
+            const backoffMs = Math.min(5_000, baseDelayMs * 2 ** (attempt - 1));
+            await sleep(backoffMs);
+        } finally {
+            if (timeout) {
+                clearTimeout(timeout);
+            }
         }
-    } catch (err) {
-        console.error('❌ 发送 Telegram 消息失败', err.message || err);
     }
+    console.error('❌ 发送 Telegram 消息失败（已重试）', lastErr && (lastErr.message || lastErr));
+    return false;
 }
 
 async function sendErrorOnce(prefix, context, err) {
@@ -124,7 +160,10 @@ async function sendErrorOnce(prefix, context, err) {
     if (!shouldSendError(key)) {
         return;
     }
-    await sendTelegramMessage(prefix, `❌ ${context}: ${msg}`);
+    const ok = await sendTelegramMessage(prefix, `❌ ${context}: ${msg}`);
+    if (ok) {
+        markErrorSent(key);
+    }
 }
 
 function loadTwoAccounts() {
@@ -195,20 +234,25 @@ async function rebalanceLoop() {
                 fetchUsdcBalance(b)
             ]);
             const nowMs = Date.now();
+            const totalAvailable = balA.available + balB.available;
+            const totalLocked = balA.locked + balB.locked;
+            const totalAll = balA.total + balB.total;
             if (nowMs >= nextStatsAtMs) {
                 const timeStr = formatBeijingTimestamp(nowMs);
                 await sendTelegramMessage(
                     buildPrefix(`${a.name} | ${b.name}`),
                     `📊 余额统计 (${timeStr} 北京时间)\n` +
-                    `${a.name} 可用: ${balA.available.toFixed(6)} | 锁定: ${balA.locked.toFixed(6)} | 总计: ${balA.total.toFixed(6)}\n` +
-                    `${b.name} 可用: ${balB.available.toFixed(6)} | 锁定: ${balB.locked.toFixed(6)} | 总计: ${balB.total.toFixed(6)}`
+                    `${a.name} 可用: ${balA.available.toFixed(2)} | 锁定: ${balA.locked.toFixed(2)} | 总计: ${balA.total.toFixed(2)}\n` +
+                    `${b.name} 可用: ${balB.available.toFixed(2)} | 锁定: ${balB.locked.toFixed(2)} | 总计: ${balB.total.toFixed(2)}\n` +
+                    `🧮 所有账户余额总结\n` +
+                    `总可用: ${totalAvailable.toFixed(2)} | 锁定: ${totalLocked.toFixed(2)} | 总计: ${totalAll.toFixed(2)}`
                 );
                 do {
                     nextStatsAtMs += STATS_INTERVAL_MS;
                 } while (nextStatsAtMs <= nowMs);
             }
 
-            const total = balA.available + balB.available;
+            const total = totalAvailable;
             if (total <= 0) {
                 console.log('ℹ️ 可用 USDC 总额为 0，跳过本轮');
                 await sleep(INTERVAL_MS);
@@ -248,7 +292,7 @@ async function rebalanceLoop() {
                 continue;
             }
 
-            console.log(`🚚 转账 ${need.toFixed(6)} USDC: ${high.account.name} -> ${low.account.name} (目标占比 46%)`);
+            console.log(`🚚 转账 ${need.toFixed(6)} USDC: ${high.account.name} -> ${low.account.name} (目标占比 50%)`);
             try {
                 const res = await transfer(high.account, low.account, need, DEFAULT_BLOCKCHAIN);
                 console.log('✅ 转账完成', { isInternal: res.isInternal, status: res.status });

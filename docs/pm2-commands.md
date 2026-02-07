@@ -2,7 +2,7 @@
 
 ## 📋 概述
 
-本文档包含所有使用 PM2 管理 `balance-rebalancer` 服务的命令。
+本文档包含所有使用 PM2 管理 `backpack-balance` 服务的命令。
 
 ## 🚀 快速启动
 
@@ -51,22 +51,22 @@ npm run rebalancer:status
 
 ```bash
 # 启动
-pm2 start ecosystem.config.js --only balance-rebalancer
+pm2 start ecosystem.config.js --only backpack-balance
 
 # 停止
-pm2 stop balance-rebalancer
+pm2 stop backpack-balance
 
 # 重启
-pm2 restart balance-rebalancer
+pm2 restart backpack-balance
 
 # 查看日志
-pm2 logs balance-rebalancer
+pm2 logs backpack-balance
 
 # 查看状态
-pm2 status balance-rebalancer
+pm2 status backpack-balance
 
 # 删除进程
-pm2 delete balance-rebalancer
+pm2 delete backpack-balance
 ```
 
 ## 📊 常用 PM2 命令
@@ -78,7 +78,7 @@ pm2 delete balance-rebalancer
 pm2 status
 
 # 查看详细信息
-pm2 show balance-rebalancer
+pm2 show backpack-balance
 
 # 监控面板（实时查看 CPU、内存等）
 pm2 monit
@@ -90,7 +90,7 @@ pm2 save
 pm2 startup
 
 # 重新加载配置（零停机时间）
-pm2 reload balance-rebalancer
+pm2 reload backpack-balance
 
 # 清空所有日志
 pm2 flush
@@ -100,19 +100,19 @@ pm2 flush
 
 ```bash
 # 查看实时日志
-pm2 logs balance-rebalancer
+pm2 logs backpack-balance
 
 # 查看最近 100 行日志
-pm2 logs balance-rebalancer --lines 100
+pm2 logs backpack-balance --lines 100
 
 # 查看错误日志
-pm2 logs balance-rebalancer --err
+pm2 logs backpack-balance --err
 
 # 查看输出日志
-pm2 logs balance-rebalancer --out
+pm2 logs backpack-balance --out
 
 # 清空日志
-pm2 flush balance-rebalancer
+pm2 flush backpack-balance
 ```
 
 ### 性能监控
@@ -122,7 +122,7 @@ pm2 flush balance-rebalancer
 pm2 monit
 
 # 查看进程信息
-pm2 describe balance-rebalancer
+pm2 describe backpack-balance
 
 # 查看资源使用情况
 pm2 list
@@ -134,21 +134,21 @@ PM2 配置文件：`ecosystem.config.js`
 
 ```javascript
 {
-  name: 'balance-rebalancer',        // 进程名称
+  name: 'backpack-balance',        // 进程名称
   script: './balance-rebalancer.js', // 启动脚本
   instances: 1,                      // 实例数量
   autorestart: true,                 // 自动重启
   watch: false,                      // 文件监听
   max_memory_restart: '500M',        // 内存限制
-  error_file: './logs/balance-rebalancer-error.log',  // 错误日志
-  out_file: './logs/balance-rebalancer-out.log'       // 输出日志
+  error_file: './logs/backpack-balance-error.log',  // 错误日志
+  out_file: './logs/backpack-balance-out.log'       // 输出日志
 }
 ```
 
 ## 📝 日志文件位置
 
-- **错误日志**: `logs/balance-rebalancer-error.log`
-- **输出日志**: `logs/balance-rebalancer-out.log`
+- **错误日志**: `logs/backpack-balance-error.log`
+- **输出日志**: `logs/backpack-balance-out.log`
 
 ## ⚠️ 注意事项
 
@@ -183,20 +183,20 @@ PM2 配置文件：`ecosystem.config.js`
 pm2 --version
 
 # 查看详细错误信息
-pm2 logs balance-rebalancer --err --lines 50
+pm2 logs backpack-balance --err --lines 50
 ```
 
 ### 进程意外停止
 
 ```bash
 # 查看进程状态
-pm2 status balance-rebalancer
+pm2 status backpack-balance
 
 # 查看错误日志
-pm2 logs balance-rebalancer --err
+pm2 logs backpack-balance --err
 
 # 手动重启
-pm2 restart balance-rebalancer
+pm2 restart backpack-balance
 ```
 
 ### 内存占用过高

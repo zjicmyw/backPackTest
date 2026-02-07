@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'balance-rebalancer',
+      name: 'backpack-balance',
       script: './balance-rebalancer.js',
       instances: 1,
       autorestart: true,
@@ -10,8 +10,8 @@ module.exports = {
       env: {
         NODE_ENV: 'production'
       },
-      error_file: './logs/balance-rebalancer-error.log',
-      out_file: './logs/balance-rebalancer-out.log',
+      error_file: './logs/backpack-balance-error.log',
+      out_file: './logs/backpack-balance-out.log',
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
       merge_logs: true
     }
